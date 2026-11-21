@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DLP AI — By Employee</title>
+<link rel="icon" href="favicon.png" type="image/png">
+<link rel="stylesheet" href="common.css">
+<style>
+  /* page-specific: the quick-search employee picker in the report panel */
+  .report-picker { position: relative; display: flex; flex-direction: column; gap: 3px; min-width: 260px; flex: 1; }
+  .report-picker label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .report-picker input { font-size: 13px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--surface); color: var(--ink); }
+  .picker-results { position: absolute; top: 100%; left: 0; right: 0; margin-top: 4px; background: var(--surface);
+    border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 6px 18px rgba(0,0,0,0.12); max-height: 280px;
+    overflow-y: auto; z-index: 20; display: none; }
+  .picker-results.open { display: block; }
+  .picker-results .opt { padding: 9px 12px; cursor: pointer; font-size: 13px; border-bottom: 1px solid var(--border); }
+  .picker-results .opt:last-child { border-bottom: none; }
+  .picker-results .opt:hover { background: var(--surface-2); }
+  .picker-results .opt .name { font-weight: 600; }
+  .picker-results .opt .sub { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+  .picker-results .empty { padding: 12px; color: var(--muted); font-size: 13px; }
+
+  #reportPanel { background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 18px 20px; margin-bottom: 32px; }
+  #reportSelectedInfo { font-family: var(--mono); font-size: 12.5px; color: var(--muted); margin: 10px 0 14px; }
+  #reportSelectedInfo b { color: var(--ink); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav class="topnav">
+    <div class="nav-left">
+      <a href="/">All Events</a>
+      <a href="/employees.html" class="active">By Employee</a>
+    </div>
+    <div class="account-widget" id="accountWidget"></div>
+  </nav>
+
+  <header class="top">
+    <div class="title-row">
+      <div>
+        <h1>By employee</h1>
+        <div class="sub">Search or pick an employee/device, generate their file-send activity straight from the DLP for any window.</div>
+      </div>
+    </div>
+  </header>
+
+  <div id="reportPanel">
+    <div class="run-controls">
+      <div class="report-picker">
+        <label>Employee (username, name, department, device, or id)</label>
+        <input type="text" id="empPickerInput" placeholder="Type to search…" autocomplete="off">
+        <div class="picker-results" id="empPickerResults"></div>
+      </div>
+      <div class="field"><label>From</label><input type="datetime-local" id="reportBegin"></div>
+      <div class="field"><label>To</label><input type="datetime-local" id="reportEnd"></div>
+      <button class="run-btn" id="loadReportBtn">Generate report</button>
+      <a class="emp-link" id="empLink" href="#" target="_blank" rel="noopener">Check in EMP ↗</a>
+    </div>
+    <div id="reportSelectedInfo">No employee selected yet — search above or pick one from the list below.</div>
+
+    <table id="reportTable" style="display:none;">
+      <thead><tr>
+        <th class="sortable" data-col="event_time" data-scope="report">Time <span class="arrow"></span></th>
+        <th class="sortable" data-col="file_name" data-scope="report">File <span class="arrow"></span></th>
+        <th class="sortable" data-col="app_desc" data-scope="report">Destination <span class="arrow"></span></th>
+        <th>Verdict</th>
+        <th class="sortable" data-col="severity" data-scope="report">Severity <span class="arrow"></span></th>
+        <th>Action</th>
+      </tr></thead>
+      <tbody id="reportBody"></tbody>
+    </table>
+  </div>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>All employees / devices</h2>
+      <span class="hint">One row per EMP login location (tuserlocations) — the same person can appear more than once if they've used multiple computers.</span>
+    </div>
+    <div class="filter-bar">
+      <input type="search" id="fEmployeeSearch" placeholder="Search name, username, department, device, id…">
+    </div>
+    <table id="employeeList">
+      <thead><tr>
+        <th>Username</th><th>Full name</th><th>Department</th><th>Device</th><th>ID</th><th>Events on file</th>
+      </tr></thead>
+      <tbody id="employeesBody"></tbody>
+    </table>
+    <div class="pager">
+      <span id="empPagerInfo"></span>
+      <div class="pageset">
+        <label style="font-size:12.5px;">Rows:</label>
+        <select id="empPageSize">
+          <option value="50">50</option>
+          <option value="100" selected>100</option>
+          <option value="200">200</option>
+          <option value="50000">All</option>
+        </select>
+        <button id="empPrevBtn">&larr; Prev</button>
+        <button id="empNextBtn">Next &rarr;</button>
+      </div>
+    </div>
+  </section>
+</div>
+
+<div id="overlay"></div>
+<div id="detail"></div>
+<div id="lightbox"><img id="lightboxImg" src="" alt=""></div>
+
+<div id="progressOverlay">
+  <div id="progressModal">
+    <h3>Analyzing event…</h3>
+    <div class="meta" id="progressMeta"></div>
+    <div class="status-line" id="progressStatusLine"></div>
+    <div id="progressSteps"></div>
+    <div class="modal-actions">
+      <button class="small-btn" id="progressHideBtn">Hide (keep running)</button>
+      <button class="small-btn stop-btn" id="stopBtn">Stop analysis</button>
+    </div>
+  </div>
+</div>
+
+<div id="labelOverlay">
+  <div id="labelModal">
+    <h3>Feed to AI</h3>
+    <div class="meta" id="labelMeta"></div>
+    <div class="field-group">
+      <label>Verdict</label>
+      <select id="labelVerdict">
+        <option value="cleared">Cleared — not an incident</option>
+        <option value="needs_human_review">Needs human review</option>
+        <option value="confirmed_risk">Confirmed risk — real incident</option>
+      </select>
+    </div>
+    <div class="field-group">
+      <label>Why (this is what the model actually reads)</label>
+      <textarea id="labelNotes" rows="5" placeholder="e.g. This is a routine monthly export this employee does every month, confirmed with their manager. Not a leak."></textarea>
+    </div>
+    <div class="modal-actions">
+      <button class="small-btn" id="labelCancelBtn">Cancel</button>
+      <button class="run-btn" id="labelSubmitBtn" style="padding:8px 16px;">Submit</button>
+    </div>
+  </div>
+</div>
+
+<script src="common.js"></script>
+<script>
+const reportState = { userLocator: null, orderBy: 'event_time', orderDir: 'desc' };
+const empListState = { limit: 100, offset: 0, search: '' };
+let allEmployeesCache = [];
+
+// ---------------- quick-search picker ----------------
+
+function pickerOptionHtml(e) {
+  const name = e.full_name || e.user_name;
+  const sub = [e.user_name, e.comp_name, e.department, `#${e.user_locator}`].filter(Boolean).join(' · ');
+  return `<div class="opt" data-user="${e.user_locator}"><div class="name">${escapeHtml(name)}</div><div class="sub">${escapeHtml(sub)}</div></div>`;
+}
+
+let pickerDebounce;
+document.getElementById('empPickerInput').oninput = e => {
+  clearTimeout(pickerDebounce);
+  const q = e.target.value.trim();
+  pickerDebounce = setTimeout(async () => { await runPickerSearch(q); }, 200);
+};
+document.getElementById('empPickerInput').onfocus = e => { if (e.target.value.trim()) runPickerSearch(e.target.value.trim()); };
+document.addEventListener('click', e => {
+  if (!e.target.closest('.report-picker')) document.getElementById('empPickerResults').classList.remove('open');
+});
+
+async function runPickerSearch(q) {
+  const resultsEl = document.getElementById('empPickerResults');
+  if (!q) { resultsEl.classList.remove('open'); return; }
+  const data = await api('/api/employees?search=' + encodeURIComponent(q) + '&limit=8');
+  if (!data.employees.length) {
+    resultsEl.innerHTML = `<div class="empty">No matches.</div>`;
+  } else {
+    resultsEl.innerHTML = data.employees.map(pickerOptionHtml).join('');
+    resultsEl.querySelectorAll('.opt').forEach(opt => {
+      opt.onclick = () => {
+        selectEmployee(parseInt(opt.dataset.user, 10));
+        resultsEl.classList.remove('open');
+        document.getElementById('empPickerInput').value = '';
+      };
+    });
+  }
+  resultsEl.classList.add('open');
+}
+
+// ---------------- report panel ----------------
+
+async function selectEmployee(userLocator) {
+  reportState.userLocator = userLocator;
+  document.querySelectorAll('#employeesBody tr').forEach(tr => tr.classList.toggle('active', tr.dataset.user == userLocator));
+  const emp = allEmployeesCache.find(e => e.user_locator === userLocator) || (await api('/api/employees?search=' + userLocator + '&limit=1')).employees[0];
+  const label = emp
+    ? `<b>${escapeHtml(emp.full_name || emp.user_name)}</b> · ${escapeHtml(emp.user_name || '')} · device ${escapeHtml(emp.comp_name || '?')} · ${escapeHtml(emp.department || 'no department on file')} · id #${emp.user_locator}`
+    : `id #${userLocator}`;
+  document.getElementById('reportSelectedInfo').innerHTML = label;
+  document.getElementById('empLink').href = window.empHost + '/emp/login/';
+  loadEmployeeReport();
+}
+
+async function loadEmployeeReport() {
+  if (!reportState.userLocator) return;
+  const begin = toApiDt(document.getElementById('reportBegin'));
+  const end = toApiDt(document.getElementById('reportEnd'));
+  if (!begin || !end) return;
+  const table = document.getElementById('reportTable');
+  table.style.display = '';
+  const body = document.getElementById('reportBody');
+  body.innerHTML = `<tr><td colspan="6"><div class="empty"><span class="spinner"></span> Pulling from DLP…</div></td></tr>`;
+  const params = new URLSearchParams({ begin, end, order_by: reportState.orderBy, order_dir: reportState.orderDir });
+  const data = await api(`/api/employees/${reportState.userLocator}/filesend?` + params.toString());
+  if (!data.events.length) {
+    body.innerHTML = `<tr><td colspan="6"><div class="empty">No file-send events for this employee in this range.</div></td></tr>`;
+  } else {
+    body.innerHTML = data.events.map(e => `
+      <tr>
+        <td class="time clickable" onclick="openDetail(${e.id})">${e.event_time}</td>
+        <td class="file clickable" title="${escapeHtml(e.file_name||'')}" onclick="openDetail(${e.id})">${escapeHtml(e.file_name || '(no filename)')}</td>
+        <td class="dest clickable" onclick="openDetail(${e.id})">${escapeHtml(e.app_desc||'')}</td>
+        <td class="clickable" onclick="openDetail(${e.id})">${pill(e.verdict, e.verdict)}</td>
+        <td class="clickable" onclick="openDetail(${e.id})">${e.severity ? `<span class="pill ${e.verdict} sev-${e.severity}">${e.severity}</span>` : ''}</td>
+        <td class="actions">
+          <button class="small-btn" onclick="event.stopPropagation(); analyzeEvent(${e.row_auto_increment}, ${reportState.userLocator}, openDetail)">Analyze event</button>
+          <button class="small-btn admin-only" style="display:${window.isAdmin ? '' : 'none'};" onclick="event.stopPropagation(); openLabelModal(${e.id}, '${escapeHtml(e.file_name||'').replace(/'/g,"\\'")}', '${escapeHtml(e.app_desc||'').replace(/'/g,"\\'")}')">Feed to AI</button>
+        </td>
+      </tr>
+    `).join('');
+  }
+  renderSortArrows('report', reportState);
+}
+document.getElementById('loadReportBtn').onclick = loadEmployeeReport;
+wireSortableHeaders('report', reportState, loadEmployeeReport);
+
+// ---------------- employee browse list ----------------
+
+async function loadEmployees() {
+  const params = new URLSearchParams({ limit: empListState.limit, offset: empListState.offset });
+  if (empListState.search) params.set('search', empListState.search);
+  const data = await api('/api/employees?' + params.toString());
+  allEmployeesCache = data.employees;
+  renderEmployees(data.employees);
+  document.getElementById('empPagerInfo').textContent =
+    `${data.total ? empListState.offset + 1 : 0}–${Math.min(empListState.offset + data.employees.length, data.total)} of ${data.total}`;
+  document.getElementById('empPrevBtn').disabled = empListState.offset === 0;
+  document.getElementById('empNextBtn').disabled = empListState.offset + empListState.limit >= data.total;
+}
+function renderEmployees(list) {
+  const body = document.getElementById('employeesBody');
+  if (!list.length) {
+    body.innerHTML = `<tr><td colspan="6"><div class="empty">No employees synced yet.</div></td></tr>`;
+    return;
+  }
+  body.innerHTML = list.map(e => `
+    <tr class="clickable" data-user="${e.user_locator}" onclick="selectEmployee(${e.user_locator})">
+      <td class="uname">${escapeHtml(e.user_name || '')}</td>
+      <td>${escapeHtml(e.full_name || '')}</td>
+      <td>${escapeHtml(e.department || '')}</td>
+      <td class="uname">${escapeHtml(e.comp_name || '')}</td>
+      <td class="idcol">#${e.user_locator}</td>
+      <td>${e.events_on_file}</td>
+    </tr>
+  `).join('');
+}
+let empSearchDebounce;
+document.getElementById('fEmployeeSearch').oninput = e => {
+  clearTimeout(empSearchDebounce);
+  empSearchDebounce = setTimeout(() => { empListState.search = e.target.value; empListState.offset = 0; loadEmployees(); }, 300);
+};
+document.getElementById('empPageSize').onchange = e => { empListState.limit = parseInt(e.target.value, 10); empListState.offset = 0; loadEmployees(); };
+document.getElementById('empPrevBtn').onclick = () => { empListState.offset = Math.max(0, empListState.offset - empListState.limit); loadEmployees(); };
+document.getElementById('empNextBtn').onclick = () => { empListState.offset += empListState.limit; loadEmployees(); };
+
+// ---------------- init ----------------
+
+async function init() {
+  if (!(await requireAuth())) return;
+  await loadEmpHost();
+  const y = yesterday();
+  setInputToDate(document.getElementById('reportBegin'), y, false);
+  setInputToDate(document.getElementById('reportEnd'), y, true);
+  loadEmployees();
+}
+init();
+</script>
+</body>
+</html>

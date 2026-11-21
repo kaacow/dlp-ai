@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DLP AI — Content Labels</title>
+<link rel="icon" href="favicon.png" type="image/png">
+<link rel="stylesheet" href="common.css">
+<style>
+  /* Additions specific to this page — kept inline rather than growing common.css
+     for a handful of one-off rules, same as index.html's inline style attributes. */
+  .pill.risk-high { background: var(--bad-soft); color: var(--bad); }
+  .pill.risk-medium { background: var(--partial-soft); color: var(--partial); }
+  .pill.risk-low { background: var(--good-soft); color: var(--good); }
+  .pill.dec-agree { background: var(--good-soft); color: var(--good); }
+  .pill.dec-correct { background: var(--partial-soft); color: var(--partial); }
+  .pill.dec-unreviewed { background: var(--surface-2); color: var(--muted); }
+  #contentBlock { font-family: var(--mono); font-size: 12.5px; white-space: pre-wrap; word-break: break-word;
+    max-height: 260px; overflow-y: auto; background: var(--surface-2); border-radius: 8px; padding: 12px; }
+  #contentBlock.expanded { max-height: none; }
+  .cat-chip-row { display: flex; flex-wrap: wrap; gap: 6px; }
+  .cat-chip { font-size: 12px; padding: 4px 10px; border-radius: 99px; border: 1px solid var(--border);
+    background: var(--surface); color: var(--ink); cursor: pointer; user-select: none; }
+  .cat-chip.on { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+  .bool-toggle { display: flex; align-items: center; gap: 8px; font-size: 13.5px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav class="topnav">
+    <div class="nav-left">
+      <a href="/">All Events</a>
+      <a href="/employees.html">By Employee</a>
+      <a href="/content_review.html" class="active">Content Labels</a>
+    </div>
+    <div class="account-widget" id="accountWidget"></div>
+  </nav>
+
+  <header class="top">
+    <div class="title-row">
+      <div class="brand-row">
+        <span class="brand-logo-text">DLP AI</span>
+        <div>
+          <h1>Content Labels</h1>
+          <div class="sub">Content-ONLY DLP judgment review — no destination/recipient shown to the model. For building a fine-tuning dataset on "is this file confidential/company-related" from content alone.</div>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <div class="stat-row" id="statRow"></div>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Labeled files</h2>
+      <span class="hint">Model-scored by content_label_seed.py — click a row to review.</span>
+    </div>
+    <div class="filter-bar">
+      <select id="fReviewed">
+        <option value="">All</option>
+        <option value="no">Unreviewed only</option>
+        <option value="yes">Reviewed only</option>
+      </select>
+      <input type="search" id="fSearch" placeholder="Search filename, summary, reasoning…">
+    </div>
+
+    <table>
+      <thead><tr>
+        <th>Date</th>
+        <th>File</th>
+        <th>Risk</th>
+        <th>Confidential</th>
+        <th>Company</th>
+        <th>Decision</th>
+        <th>Reviewed by</th>
+      </tr></thead>
+      <tbody id="labelsBody"></tbody>
+    </table>
+    <div class="pager">
+      <span id="pagerInfo"></span>
+      <div class="pageset">
+        <label style="font-size:12.5px;">Rows:</label>
+        <select id="pageSize">
+          <option value="50">50</option>
+          <option value="100">100</option>
+          <option value="200">200</option>
+        </select>
+        <button id="prevBtn">&larr; Prev</button>
+        <button id="nextBtn">Next &rarr;</button>
+      </div>
+    </div>
+  </section>
+</div>
+
+<div id="overlay"></div>
+<div id="detail"></div>
+
+<div id="correctOverlay">
+  <div id="correctModal">
+    <h3>Correct judgment</h3>
+    <div class="meta" id="correctMeta"></div>
+    <div class="field-group">
+      <label>Risk score (0-100)</label>
+      <input type="number" id="cRiskScore" min="0" max="100" style="font-size:13.5px; padding:8px 10px; border:1px solid var(--border); border-radius:7px; background:var(--bg); color:var(--ink);">
+    </div>
+    <div class="field-group">
+      <label class="bool-toggle"><input type="checkbox" id="cConfidential"> Is confidential</label>
+    </div>
+    <div class="field-group">
+      <label class="bool-toggle"><input type="checkbox" id="cRelatedCompany"> Related to company</label>
+    </div>
+    <div class="field-group">
+      <label>Categories</label>
+      <div class="cat-chip-row" id="cCategories"></div>
+    </div>
+    <div class="field-group">
+      <label>Company relevance reasoning</label>
+      <textarea id="cCompanyReasoning" rows="2"></textarea>
+    </div>
+    <div class="field-group">
+      <label>Summary</label>
+      <textarea id="cSummary" rows="3"></textarea>
+    </div>
+    <div class="field-group">
+      <label>Reasoning</label>
+      <textarea id="cReasoning" rows="4"></textarea>
+    </div>
+    <div class="modal-actions">
+      <button class="small-btn" id="correctCancelBtn">Cancel</button>
+      <button class="run-btn" id="correctSubmitBtn" style="padding:8px 16px;">Save correction</button>
+    </div>
+  </div>
+</div>
+
+<script src="common.js"></script>
+<script>
+const CATEGORY_ENUM = ["pii", "financial", "credentials_secrets", "legal_contract", "trade_secret",
+                        "source_code", "internal_policy", "health_data", "personal", "other"];
+const state = { limit: 50, offset: 0, reviewed: '', search: '' };
+let currentLabelId = null;
+let currentFullText = null;
+
+function riskPillClass(score) {
+  if (score >= 65) return 'risk-high';
+  if (score >= 35) return 'risk-medium';
+  return 'risk-low';
+}
+function decisionPill(item) {
+  if (item.analyst_decision === 'agree') return '<span class="pill dec-agree">agree</span>';
+  if (item.analyst_decision === 'correct') return '<span class="pill dec-correct">corrected</span>';
+  return '<span class="pill dec-unreviewed">unreviewed</span>';
+}
+
+async function loadStats() {
+  const all = await api('/api/content-labels?limit=1');
+  const unreviewed = await api('/api/content-labels?reviewed=no&limit=1');
+  const reviewed = await api('/api/content-labels?reviewed=yes&limit=1');
+  const cells = [
+    `<div class="stat-cell"><div class="n">${all.total}</div><div class="l">Total labeled</div></div>`,
+    `<div class="stat-cell"><div class="n">${unreviewed.total}</div><div class="l">Unreviewed</div></div>`,
+    `<div class="stat-cell"><div class="n">${reviewed.total}</div><div class="l">Reviewed</div></div>`,
+  ];
+  document.getElementById('statRow').innerHTML = cells.join('');
+  document.getElementById('statRow').style.gridTemplateColumns = 'repeat(3, 1fr)';
+}
+
+async function loadLabels() {
+  const params = new URLSearchParams({ limit: state.limit, offset: state.offset });
+  if (state.reviewed) params.set('reviewed', state.reviewed);
+  if (state.search) params.set('search', state.search);
+  const data = await api('/api/content-labels?' + params.toString());
+
+  const body = document.getElementById('labelsBody');
+  if (!data.items.length) {
+    body.innerHTML = `<tr><td colspan="7"><div class="empty">No content labels match. Run the backfill script, or clear filters.</div></td></tr>`;
+  } else {
+    body.innerHTML = data.items.map(it => `
+      <tr class="clickable" onclick="openDetail(${it.id})">
+        <td class="time">${it.event_date}</td>
+        <td class="file" title="${escapeHtml(it.file_name)}">${escapeHtml(it.file_name)}</td>
+        <td><span class="pill ${riskPillClass(it.model_risk_score)}">${it.model_risk_score}</span></td>
+        <td>${it.model_is_confidential ? 'yes' : 'no'}</td>
+        <td>${it.model_related_to_company ? 'yes' : 'no'}</td>
+        <td>${decisionPill(it)}</td>
+        <td class="uname">${escapeHtml(it.reviewed_by || '')}</td>
+      </tr>
+    `).join('');
+  }
+
+  document.getElementById('pagerInfo').textContent =
+    `${data.total ? state.offset + 1 : 0}–${Math.min(state.offset + data.items.length, data.total)} of ${data.total}`;
+  document.getElementById('prevBtn').disabled = state.offset === 0;
+  document.getElementById('nextBtn').disabled = state.offset + state.limit >= data.total;
+}
+
+document.getElementById('fReviewed').onchange = e => { state.reviewed = e.target.value; state.offset = 0; loadLabels(); };
+let searchDebounce;
+document.getElementById('fSearch').oninput = e => {
+  clearTimeout(searchDebounce);
+  searchDebounce = setTimeout(() => { state.search = e.target.value; state.offset = 0; loadLabels(); }, 300);
+};
+document.getElementById('prevBtn').onclick = () => { state.offset = Math.max(0, state.offset - state.limit); loadLabels(); };
+document.getElementById('nextBtn').onclick = () => { state.offset += state.limit; loadLabels(); };
+document.getElementById('pageSize').onchange = e => { state.limit = parseInt(e.target.value, 10); state.offset = 0; loadLabels(); };
+
+// ---------------- detail panel ----------------
+
+function categoriesHtml(cats) {
+  return (cats || []).map(c => `<span class="pill" style="background:var(--surface-2); color:var(--ink);">${escapeHtml(c)}</span>`).join(' ') || '<span style="color:var(--muted);">none</span>';
+}
+
+function detailHtmlFor(it) {
+  const shownFields = it.analyst_decision === 'correct' && it.analyst_correction ? it.analyst_correction : {
+    is_confidential: it.model_is_confidential, risk_score: it.model_risk_score, categories: it.model_categories,
+    related_to_company: it.model_related_to_company, company_relevance_reasoning: it.model_company_relevance_reasoning,
+    summary: it.model_summary, reasoning: it.model_reasoning,
+  };
+  return `
+    <button class="close" onclick="closeDetail()">&times;</button>
+    <h2>${escapeHtml(it.file_name)}</h2>
+    <div class="meta">${it.event_date} · ${it.is_doc_type ? 'document' : 'image'} · ${decisionPill(it)}${it.reviewed_by ? ' · reviewed by ' + escapeHtml(it.reviewed_by) + ' at ' + escapeHtml(it.reviewed_at || '') : ''}</div>
+
+    <div class="block">
+      <h3>Extracted content</h3>
+      <div id="contentBlock">${escapeHtml(it.content_preview || '(no content extracted)')}${it.content_truncated ? '\n\n[truncated — click Expand for full text]' : ''}</div>
+      ${it.content_truncated ? '<button class="small-btn" id="expandContentBtn" style="margin-top:8px;">Expand full text</button>' : ''}
+    </div>
+
+    <div class="block">
+      <h3>${it.analyst_decision === 'correct' ? 'Analyst correction (shown instead of model output)' : "Model judgment"}</h3>
+      <p><span class="pill ${riskPillClass(shownFields.risk_score)}">risk ${shownFields.risk_score}</span>
+         ${shownFields.is_confidential ? '<span class="pill dec-correct">confidential</span>' : ''}
+         ${shownFields.related_to_company ? '<span class="pill dec-agree">related to company</span>' : ''}</p>
+      <p style="margin-top:10px;"><b>Categories:</b> ${categoriesHtml(shownFields.categories)}</p>
+      <p style="margin-top:10px;"><b>Summary:</b> ${escapeHtml(shownFields.summary || '')}</p>
+      <p style="margin-top:10px;"><b>Reasoning:</b> ${escapeHtml(shownFields.reasoning || '')}</p>
+      <p style="margin-top:10px;"><b>Company relevance:</b> ${escapeHtml(shownFields.company_relevance_reasoning || '')}</p>
+      ${it.analyst_decision === 'correct' ? `<details style="margin-top:14px;"><summary style="cursor:pointer; color:var(--muted); font-size:12.5px;">Original model output</summary>
+        <p style="margin-top:8px;"><span class="pill ${riskPillClass(it.model_risk_score)}">risk ${it.model_risk_score}</span></p>
+        <p style="margin-top:8px;">${escapeHtml(it.model_reasoning || '')}</p></details>` : ''}
+    </div>
+
+    <div class="modal-actions" style="display:flex; justify-content:flex-start; gap:10px;">
+      <button class="run-btn" style="padding:8px 16px;" onclick="agreeLabel(${it.id})">Agree</button>
+      <button class="small-btn" onclick="openCorrectModal(${it.id})">Correct</button>
+    </div>
+  `;
+}
+
+async function openDetail(id) {
+  currentLabelId = id;
+  currentFullText = null;
+  const it = await api('/api/content-labels/' + id);
+  window._currentItem = it;
+  document.getElementById('detail').innerHTML = detailHtmlFor(it);
+  document.getElementById('overlay').classList.add('open');
+  document.getElementById('detail').classList.add('open');
+  const expandBtn = document.getElementById('expandContentBtn');
+  if (expandBtn) expandBtn.onclick = () => {
+    document.getElementById('contentBlock').textContent = it.extracted_text_ref || '(no content extracted)';
+    document.getElementById('contentBlock').classList.add('expanded');
+    expandBtn.style.display = 'none';
+  };
+}
+function closeDetail() {
+  document.getElementById('overlay').classList.remove('open');
+  document.getElementById('detail').classList.remove('open');
+}
+
+async function agreeLabel(id) {
+  await api(`/api/content-labels/${id}/agree`, { method: 'POST' });
+  closeDetail();
+  loadLabels();
+  loadStats();
+}
+
+// ---------------- correct modal ----------------
+
+function renderCategoryChips(selected) {
+  const wrap = document.getElementById('cCategories');
+  wrap.innerHTML = CATEGORY_ENUM.map(c =>
+    `<span class="cat-chip${selected.includes(c) ? ' on' : ''}" data-cat="${c}">${c}</span>`
+  ).join('');
+  wrap.querySelectorAll('.cat-chip').forEach(chip => {
+    chip.onclick = () => chip.classList.toggle('on');
+  });
+}
+
+function openCorrectModal(id) {
+  const it = window._currentItem;
+  document.getElementById('correctMeta').textContent = it.file_name;
+  document.getElementById('cRiskScore').value = it.model_risk_score;
+  document.getElementById('cConfidential').checked = !!it.model_is_confidential;
+  document.getElementById('cRelatedCompany').checked = !!it.model_related_to_company;
+  renderCategoryChips(it.model_categories || []);
+  document.getElementById('cCompanyReasoning').value = it.model_company_relevance_reasoning || '';
+  document.getElementById('cSummary').value = it.model_summary || '';
+  document.getElementById('cReasoning').value = it.model_reasoning || '';
+  document.getElementById('correctOverlay').classList.add('open');
+}
+function closeCorrectModal() {
+  document.getElementById('correctOverlay').classList.remove('open');
+}
+async function submitCorrection() {
+  const btn = document.getElementById('correctSubmitBtn');
+  btn.disabled = true;
+  try {
+    const categories = Array.from(document.querySelectorAll('#cCategories .cat-chip.on')).map(c => c.dataset.cat);
+    await api(`/api/content-labels/${currentLabelId}/correct`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        is_confidential: document.getElementById('cConfidential').checked,
+        risk_score: parseInt(document.getElementById('cRiskScore').value, 10) || 0,
+        categories,
+        related_to_company: document.getElementById('cRelatedCompany').checked,
+        company_relevance_reasoning: document.getElementById('cCompanyReasoning').value.trim(),
+        summary: document.getElementById('cSummary').value.trim(),
+        reasoning: document.getElementById('cReasoning').value.trim(),
+      }),
+    });
+    closeCorrectModal();
+    closeDetail();
+    loadLabels();
+    loadStats();
+  } catch (ex) {
+    alert('Failed to save: ' + ex.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const overlay = document.getElementById('overlay');
+  if (overlay) overlay.onclick = closeDetail;
+  document.getElementById('correctCancelBtn').onclick = closeCorrectModal;
+  document.getElementById('correctSubmitBtn').onclick = submitCorrection;
+  document.getElementById('correctOverlay').addEventListener('click', e => {
+    if (e.target === document.getElementById('correctOverlay')) closeCorrectModal();
+  });
+});
+
+// ---------------- init ----------------
+
+async function init() {
+  if (!(await requireAuth())) return;
+  loadStats();
+  loadLabels();
+}
+init();
+</script>
+</body>
+</html>

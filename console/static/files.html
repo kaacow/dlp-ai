@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>File Analyzer — DLP AI Console</title>
+<link rel="icon" href="favicon.png" type="image/png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app-shell">
+  <div id="sidebarMount"></div>
+  <div class="content">
+    <div class="content-header">
+      <div><h1>File Analyzer</h1><div class="sub">Upload a file to get an AI risk score, confidentiality verdict, and company-relevance check.</div></div>
+      <a href="/files-history.html" class="btn secondary" style="margin-left:auto;">History</a>
+    </div>
+    <div class="content-body">
+
+      <div class="card">
+        <div class="dropzone" id="dropzone">
+          <div><strong>Drop files here</strong> or click to choose</div>
+          <div style="margin-top:6px; font-size:12px;">PDF, Word, Excel, PowerPoint, text/CSV, images/scans (OCR) — up to 20 files</div>
+          <input type="file" id="fileInput" multiple>
+        </div>
+        <div class="file-list" id="fileList"></div>
+        <div class="instructions-field">
+          <label for="instructions">Additional instructions (optional)</label>
+          <textarea id="instructions" rows="2" placeholder="e.g. pay extra attention to competitor names, or these are expected to be signed contracts — flag anything missing a signature"></textarea>
+        </div>
+        <div class="controls-row">
+          <label class="checkbox-field"><input type="checkbox" id="saveHistory" checked> Save this scan to history</label>
+          <label class="checkbox-field" title="Only affects long documents that get split into segments — quick uses fewer, larger segments (faster, slightly less exhaustive); thorough uses more, smaller segments (slower, more reliable). No effect on typical short files either way.">
+            Analysis depth:
+            <select id="depthSelect">
+              <option value="thorough" selected>Thorough (recommended)</option>
+              <option value="quick">Quick</option>
+            </select>
+          </label>
+          <button class="btn" id="analyzeBtn" disabled>Analyze</button>
+        </div>
+        <div class="progress-wrap" id="progressWrap" style="display:none;">
+          <div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:0%;"></div></div>
+          <div class="progress-meta">
+            <span id="progressLabel">0%</span>
+            <span id="progressEta"></span>
+          </div>
+        </div>
+        <div class="steps" id="steps" style="display:none;"></div>
+      </div>
+
+      <div class="results-header" id="resultsHeader" style="display:none;">
+        <button class="btn secondary" id="clearViewBtn">Clear view</button>
+      </div>
+      <div class="results" id="results"></div>
+
+    </div>
+  </div>
+</div>
+
+<script src="common.js"></script>
+<script src="files-common.js"></script>
+<script>
+let selectedFiles = [];
+let pollTimer = null;
+let finalizedScans = new Set();
+
+const SESSION_JOBS_KEY = 'fileAnalyzerSessionJobs';
+const MAX_SESSION_JOBS = 20;
+
+const dropzone = document.getElementById('dropzone');
+const fileInput = document.getElementById('fileInput');
+const fileListEl = document.getElementById('fileList');
+const analyzeBtn = document.getElementById('analyzeBtn');
+const stepsEl = document.getElementById('steps');
+const resultsEl = document.getElementById('results');
+const resultsHeaderEl = document.getElementById('resultsHeader');
+const clearViewBtn = document.getElementById('clearViewBtn');
+const progressWrapEl = document.getElementById('progressWrap');
+const progressFillEl = document.getElementById('progressFill');
+const progressLabelEl = document.getElementById('progressLabel');
+const progressEtaEl = document.getElementById('progressEta');
+
+function formatDuration(sec) {
+  sec = Math.max(0, Math.round(sec));
+  if (sec < 60) return `${sec}s`;
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${m}m ${s}s`;
+}
+
+function loadSessionJobs() {
+  try { return JSON.parse(localStorage.getItem(SESSION_JOBS_KEY)) || []; } catch (e) { return []; }
+}
+function addSessionJob(jobId) {
+  const ids = loadSessionJobs();
+  ids.push(jobId);
+  while (ids.length > MAX_SESSION_JOBS) ids.shift();
+  localStorage.setItem(SESSION_JOBS_KEY, JSON.stringify(ids));
+}
+function updateResultsHeader() {
+  resultsHeaderEl.style.display = resultsEl.children.length ? 'flex' : 'none';
+}
+
+clearViewBtn.onclick = () => {
+  if (pollTimer) clearInterval(pollTimer);
+  resultsEl.innerHTML = '';
+  finalizedScans = new Set();
+  localStorage.removeItem(SESSION_JOBS_KEY);
+  stepsEl.style.display = 'none';
+  stepsEl.innerHTML = '';
+  progressWrapEl.style.display = 'none';
+  updateResultsHeader();
+};
+
+dropzone.addEventListener('click', () => fileInput.click());
+dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('drag'); });
+dropzone.addEventListener('dragleave', () => dropzone.classList.remove('drag'));
+dropzone.addEventListener('drop', (e) => {
+  e.preventDefault();
+  dropzone.classList.remove('drag');
+  addFiles(e.dataTransfer.files);
+});
+fileInput.addEventListener('change', () => { addFiles(fileInput.files); fileInput.value = ''; });
+
+function addFiles(fileListArg) {
+  for (const f of fileListArg) selectedFiles.push(f);
+  renderFileList();
+}
+function removeFile(idx) {
+  selectedFiles.splice(idx, 1);
+  renderFileList();
+}
+function renderFileList() {
+  fileListEl.innerHTML = selectedFiles.map((f, i) => `
+    <div class="file-row">
+      <span class="name">${escapeHtml(f.name)}</span>
+      <span class="size">${fmtBytes(f.size)}</span>
+      <button data-remove="${i}">✕</button>
+    </div>
+  `).join('');
+  fileListEl.querySelectorAll('[data-remove]').forEach(btn => {
+    btn.onclick = () => removeFile(parseInt(btn.dataset.remove));
+  });
+  analyzeBtn.disabled = selectedFiles.length === 0;
+}
+
+analyzeBtn.onclick = async () => {
+  if (!selectedFiles.length) return;
+  analyzeBtn.disabled = true;
+  stepsEl.style.display = 'block';
+  stepsEl.innerHTML = '<div>Uploading…</div>';
+  progressWrapEl.style.display = 'block';
+  progressFillEl.style.width = '0%';
+  progressLabelEl.textContent = '0%';
+  progressEtaEl.textContent = '';
+
+  const form = new FormData();
+  for (const f of selectedFiles) form.append('files', f);
+  form.append('save_to_history', document.getElementById('saveHistory').checked ? 'true' : 'false');
+  form.append('instructions', document.getElementById('instructions').value.trim());
+  form.append('depth', document.getElementById('depthSelect').value);
+
+  try {
+    const res = await api('/api/files/analyze', { method: 'POST', body: form });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || 'Upload failed');
+    const data = await res.json();
+    addSessionJob(data.job_id);
+    selectedFiles = [];
+    renderFileList();
+    document.getElementById('instructions').value = '';
+    pollJob(data.job_id);
+  } catch (e) {
+    stepsEl.innerHTML = `<div style="color:var(--bad)">${escapeHtml(e.message)}</div>`;
+    analyzeBtn.disabled = false;
+  }
+};
+
+function pollJob(jobId) {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(async () => {
+    const res = await api(`/api/files/jobs/${jobId}`);
+    if (!res.ok) { clearInterval(pollTimer); return; }
+    const job = await res.json();
+    renderJob(job);
+    if (job.status === 'done' || job.status === 'failed') {
+      clearInterval(pollTimer);
+      analyzeBtn.disabled = selectedFiles.length === 0;
+    }
+  }, 1200);
+}
+
+function renderJob(job) {
+  stepsEl.innerHTML = job.steps.map(s => `<div>${escapeHtml(s.msg)}</div>`).join('')
+    || `<div>${job.completed_files}/${job.total_files} complete</div>`;
+  stepsEl.scrollTop = stepsEl.scrollHeight;
+
+  if (job.progress_percent != null) {
+    progressWrapEl.style.display = 'block';
+    progressFillEl.style.width = `${job.progress_percent}%`;
+    progressLabelEl.textContent = `${Math.round(job.progress_percent)}% · ${job.completed_files}/${job.total_files} files`;
+    if (job.status === 'running') {
+      progressEtaEl.textContent = job.eta_seconds != null ? `~${formatDuration(job.eta_seconds)} remaining` : '';
+    } else {
+      progressEtaEl.textContent = job.status === 'done' ? 'Done' : 'Failed';
+    }
+  }
+
+  for (const scan of job.scans) {
+    if (finalizedScans.has(scan.id)) continue;
+    let wrap = document.getElementById(`scan-wrap-${scan.id}`);
+    if (!wrap) {
+      wrap = document.createElement('div');
+      wrap.id = `scan-wrap-${scan.id}`;
+      resultsEl.appendChild(wrap);
+    }
+    wrap.innerHTML = renderResultCard(scan, { showDelete: false });
+    const isFinal = scan.risk_score != null || scan.error;
+    if (isFinal) {
+      finalizedScans.add(scan.id);
+      if (!scan.error) initChatUI(scan.id);
+    }
+  }
+  updateResultsHeader();
+}
+
+async function restoreSession() {
+  const ids = loadSessionJobs();
+  for (const id of ids) {
+    try {
+      const res = await api(`/api/files/jobs/${id}`);
+      if (!res.ok) continue;
+      const job = await res.json();
+      renderJob(job);
+      if (job.status === 'running') {
+        analyzeBtn.disabled = true;
+        stepsEl.style.display = 'block';
+        pollJob(id);
+      }
+    } catch (e) { /* best-effort restore */ }
+  }
+}
+
+(async () => {
+  await initPage('files');
+  restoreSession();
+})();
+</script>
+</body>
+</html>

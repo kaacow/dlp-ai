@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DLP AI — Users</title>
+<link rel="icon" href="favicon.png" type="image/png">
+<link rel="stylesheet" href="common.css">
+<style>
+  .user-row { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-bottom: 1px solid var(--border); }
+  .user-row:last-child { border-bottom: none; }
+  .user-row .avatar-img, .user-row .avatar-fallback { width: 36px; height: 36px; }
+  .user-row .info { flex: 1; min-width: 0; }
+  .user-row .uname { font-weight: 600; font-size: 14px; }
+  .user-row .meta { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+  .user-row .actions { display: flex; gap: 8px; align-items: center; }
+  #createUserPanel { background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 18px 20px; margin-bottom: 28px; }
+  #createUserPanel h3 { font-family: var(--serif); font-size: 17px; margin: 0 0 14px; }
+  .create-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; }
+  .create-row .field { display: flex; flex-direction: column; gap: 4px; }
+  .create-row label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .create-row input, .create-row select { font-size: 13.5px; padding: 8px 10px; border: 1px solid var(--border);
+    border-radius: 7px; background: var(--bg); color: var(--ink); }
+  #createErr { color: var(--bad); font-size: 13px; margin-top: 10px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav class="topnav">
+    <div class="nav-left">
+      <a href="/">All Events</a>
+      <a href="/employees.html">By Employee</a>
+      <a href="/users.html" class="active">Users</a>
+    </div>
+    <div class="account-widget" id="accountWidget"></div>
+  </nav>
+
+  <header class="top">
+    <div class="title-row">
+      <div>
+        <h1>Users</h1>
+        <div class="sub">Create accounts, grant or revoke admin access. The primary admin's access can never be changed by anyone.</div>
+      </div>
+    </div>
+  </header>
+
+  <div id="createUserPanel">
+    <h3>Create a new user</h3>
+    <div class="create-row">
+      <div class="field"><label>Username</label><input type="text" id="newUsername"></div>
+      <div class="field"><label>Temporary password (min 8 chars)</label><input type="password" id="newPassword"></div>
+      <div class="field"><label>Role</label>
+        <select id="newRole"><option value="user">Regular user</option><option value="admin">Admin</option></select>
+      </div>
+      <button class="run-btn" id="createUserBtn" style="padding:8px 16px;">Create user</button>
+    </div>
+    <div id="createErr"></div>
+  </div>
+
+  <section class="panel">
+    <div class="panel-head"><h2>All users</h2></div>
+    <div id="usersList" style="background:var(--surface); border:1px solid var(--border); border-radius:10px;"></div>
+  </section>
+</div>
+
+<div id="overlay"></div>
+<div id="detail"></div>
+<div id="lightbox"><img id="lightboxImg" src="" alt=""></div>
+
+<script src="common.js"></script>
+<script>
+async function loadUsers() {
+  const users = await api('/api/users');
+  const el = document.getElementById('usersList');
+  el.innerHTML = users.map(u => {
+    const avatarHtml = u.profile_picture
+      ? `<img class="avatar-img" src="/api/profile-pictures/${u.profile_picture}" alt="">`
+      : `<span class="avatar-fallback">${escapeHtml((u.username[0]||'?').toUpperCase())}</span>`;
+    const isSelf = window.currentUser && u.id === window.currentUser.id;
+    let actions = '';
+    if (u.is_primary_admin) {
+      actions = `<span class="pill" style="background:var(--accent-soft); color:var(--accent);">primary admin — permanent</span>`;
+    } else {
+      const roleBtn = u.role === 'admin'
+        ? `<button class="small-btn" onclick="setRole(${u.id}, 'user')">Revoke admin</button>`
+        : `<button class="small-btn" onclick="setRole(${u.id}, 'admin')">Grant admin</button>`;
+      const delBtn = isSelf
+        ? ''
+        : `<button class="small-btn stop-btn" onclick="deleteUser(${u.id}, '${escapeHtml(u.username).replace(/'/g,"\\'")}')">Delete</button>`;
+      actions = roleBtn + delBtn;
+    }
+    return `
+      <div class="user-row">
+        ${avatarHtml}
+        <div class="info">
+          <div class="uname">${escapeHtml(u.username)} ${u.role === 'admin' ? '<span class="pill" style="background:var(--accent-soft); color:var(--accent);">admin</span>' : ''}</div>
+          <div class="meta">#${u.id} · joined ${u.created_at}${isSelf ? ' · this is you' : ''}</div>
+        </div>
+        <div class="actions">${actions}</div>
+      </div>
+    `;
+  }).join('');
+}
+
+async function setRole(userId, role) {
+  try {
+    await api(`/api/users/${userId}/role`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role }),
+    });
+    loadUsers();
+  } catch (ex) {
+    alert('Failed: ' + ex.message);
+  }
+}
+
+async function deleteUser(userId, username) {
+  if (!confirm(`Delete user "${username}"? This cannot be undone.`)) return;
+  try {
+    await api(`/api/users/${userId}`, { method: 'DELETE' });
+    loadUsers();
+  } catch (ex) {
+    alert('Failed: ' + ex.message);
+  }
+}
+
+document.getElementById('createUserBtn').onclick = async () => {
+  const errEl = document.getElementById('createErr');
+  errEl.textContent = '';
+  const username = document.getElementById('newUsername').value.trim();
+  const password = document.getElementById('newPassword').value;
+  const role = document.getElementById('newRole').value;
+  try {
+    await api('/api/users', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password, role }),
+    });
+    document.getElementById('newUsername').value = '';
+    document.getElementById('newPassword').value = '';
+    document.getElementById('newRole').value = 'user';
+    loadUsers();
+  } catch (ex) {
+    errEl.textContent = ex.message;
+  }
+};
+
+async function init() {
+  if (!(await requireAuth())) return;
+  if (!window.isAdmin) { window.location.href = '/'; return; }
+  loadUsers();
+}
+init();
+</script>
+</body>
+</html>

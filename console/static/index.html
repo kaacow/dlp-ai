@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dashboard — DLP AI Console</title>
+<link rel="icon" href="favicon.png" type="image/png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app-shell">
+  <div id="sidebarMount"></div>
+  <div class="content">
+    <div class="content-header"><div><h1>Dashboard</h1><div class="sub" id="welcomeMsg"></div></div></div>
+    <div class="content-body">
+      <div class="tile-grid">
+        <a class="tile" href="/secrets.html">
+          <div class="tile-icon">&#128273;</div>
+          <div class="tile-title">Secret Scanner</div>
+          <div class="tile-stats" id="secretsStats"><span style="color:var(--muted); font-size:12.5px;">Loading…</span></div>
+          <div class="tile-cta">Open →</div>
+        </a>
+        <a class="tile" href="/mail.html">
+          <div class="tile-icon">&#9993;</div>
+          <div class="tile-title">Mail Exfil Detector</div>
+          <div class="tile-stats" id="mailStats"><span style="color:var(--muted); font-size:12.5px;">Loading…</span></div>
+          <div class="tile-cta">Open →</div>
+        </a>
+        <a class="tile" href="/files.html">
+          <div class="tile-icon">&#128196;</div>
+          <div class="tile-title">File Analyzer</div>
+          <div class="tile-stats" id="filesStats"><span style="color:var(--muted); font-size:12.5px;">Loading…</span></div>
+          <div class="tile-cta">Open →</div>
+        </a>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="common.js"></script>
+<script>
+async function totalOf(path) {
+  try {
+    const data = await (await api(path)).json();
+    return data.total ?? (Array.isArray(data) ? data.length : 0);
+  } catch (e) { return null; }
+}
+
+function statHtml(num, label) {
+  return `<div><div class="stat-num">${num == null ? '—' : num}</div><div class="stat-label">${label}</div></div>`;
+}
+
+async function loadSecretsStats() {
+  const el = document.getElementById('secretsStats');
+  const [runs, filesTotal, highTotal] = await Promise.all([
+    api('/api/secrets/runs?limit=1').then(r => r.json()).catch(() => []),
+    totalOf('/api/secrets/files?limit=1&scan_status=scanned'),
+    totalOf('/api/secrets/files?limit=1&severity=high'),
+  ]);
+  const lastRun = runs[0] ? fmtDate(runs[0].started_at) : 'never run';
+  el.innerHTML = statHtml(filesTotal, 'files scanned') + statHtml(highTotal, 'high severity');
+  el.insertAdjacentHTML('afterend', `<div style="font-size:11.5px; color:var(--muted); margin-top:8px;">Last run: ${escapeHtml(lastRun)}</div>`);
+}
+
+async function loadMailStats() {
+  const el = document.getElementById('mailStats');
+  const [corpTotal, exTotal] = await Promise.all([
+    totalOf('/api/mail/events?limit=1'),
+    totalOf('/api/exchange/events?limit=1'),
+  ]);
+  el.innerHTML = statHtml(corpTotal, 'corp flagged') + statHtml(exTotal, 'exchange flagged');
+}
+
+async function loadFilesStats() {
+  const el = document.getElementById('filesStats');
+  const [scansTotal, highTotal] = await Promise.all([
+    totalOf('/api/files/history?limit=1'),
+    totalOf('/api/files/history?limit=1&min_score=75'),
+  ]);
+  el.innerHTML = statHtml(scansTotal, 'files analyzed') + statHtml(highTotal, 'high risk');
+}
+
+(async () => {
+  await initPage('dashboard');
+  document.getElementById('welcomeMsg').textContent = `Welcome back, ${window.currentUser.display_name}.`;
+  loadSecretsStats();
+  loadMailStats();
+  loadFilesStats();
+})();
+</script>
+</body>
+</html>

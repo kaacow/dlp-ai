@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Users — DLP AI Console</title>
+<link rel="icon" href="favicon.png" type="image/png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app-shell">
+  <div id="sidebarMount"></div>
+  <div class="content">
+    <div class="content-header"><div><h1>Users</h1><div class="sub">Manage who can access the console.</div></div></div>
+    <div class="content-body">
+
+      <div class="card">
+        <h3 style="margin-top:0;">Add user</h3>
+        <div class="field-row">
+          <div class="field"><label>Username</label><input type="text" id="newUsername"></div>
+          <div class="field"><label>Password</label><input type="password" id="newPassword" minlength="8"></div>
+          <div class="field">
+            <label>Role</label>
+            <select id="newRole"><option value="user">User</option><option value="admin">Admin</option></select>
+          </div>
+        </div>
+        <button class="btn" id="createBtn" type="button">Create user</button>
+        <div class="form-error" id="createError" style="display:none;"></div>
+      </div>
+
+      <div class="card">
+        <h3 style="margin-top:0;">All users</h3>
+        <div id="tableWrap"></div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="resetOverlay">
+  <div class="detail-panel" style="max-width:380px;">
+    <button class="close-btn" id="closeReset">&times;</button>
+    <h3 style="margin-top:0;">Reset password</h3>
+    <div class="sub" id="resetForUser" style="color:var(--muted); font-size:13px; margin-bottom:14px;"></div>
+    <div class="field"><label>New password</label><input type="password" id="resetPasswordInput" minlength="8"></div>
+    <button class="btn" id="confirmResetBtn" type="button">Set new password</button>
+    <div class="form-error" id="resetError" style="display:none;"></div>
+    <div class="form-note" id="resetNote" style="display:none;"></div>
+  </div>
+</div>
+
+<script src="common.js"></script>
+<script>
+let resetUserId = null;
+
+(async () => {
+  await initPage('users');
+  if (!window.isAdmin) { window.location.href = '/'; return; }
+  await load();
+})();
+
+async function load() {
+  const users = await apiJson('/api/users');
+  renderTable(users);
+}
+
+function avatarHtml(u) {
+  if (u.profile_picture) {
+    return `<img class="user-row-avatar" src="/api/profile-pictures/${encodeURIComponent(u.profile_picture)}" style="object-fit:cover;">`;
+  }
+  return `<div class="user-row-avatar">${escapeHtml(initials(u.display_name))}</div>`;
+}
+
+function renderTable(users) {
+  const wrap = document.getElementById('tableWrap');
+  wrap.innerHTML = `<table class="data-table">
+    <thead><tr><th></th><th>Name</th><th>Username</th><th>Role</th><th>Session default</th><th>Created</th><th></th></tr></thead>
+    <tbody>
+      ${users.map(u => `
+        <tr>
+          <td>${avatarHtml(u)}</td>
+          <td class="name-cell">${escapeHtml(u.display_name)}${u.is_primary_admin ? ' <span class="pill admin">primary</span>' : ''}</td>
+          <td>${escapeHtml(u.username)}</td>
+          <td><span class="pill ${u.role === 'admin' ? 'admin' : ''}">${escapeHtml(u.role)}</span></td>
+          <td>${escapeHtml(u.default_session_duration)}</td>
+          <td>${fmtDate(u.created_at)}</td>
+          <td style="white-space:nowrap;">
+            ${!u.is_primary_admin ? `<button class="btn secondary small" data-role-toggle="${u.id}" data-role="${u.role === 'admin' ? 'user' : 'admin'}">${u.role === 'admin' ? 'Revoke admin' : 'Make admin'}</button>` : ''}
+            ${u.id !== window.currentUser.id ? `<button class="btn secondary small" data-reset="${u.id}" data-name="${escapeHtml(u.display_name)}">Reset password</button>` : ''}
+            ${!u.is_primary_admin && u.id !== window.currentUser.id ? `<button class="btn danger small" data-delete="${u.id}" data-name="${escapeHtml(u.display_name)}">Delete</button>` : ''}
+          </td>
+        </tr>
+      `).join('')}
+    </tbody>
+  </table>`;
+
+  wrap.querySelectorAll('[data-role-toggle]').forEach(btn => {
+    btn.onclick = async () => {
+      try {
+        await apiJson(`/api/users/${btn.dataset.roleToggle}/role`, { method: 'POST', body: { role: btn.dataset.role } });
+        load();
+      } catch (ex) { alert(ex.message); }
+    };
+  });
+  wrap.querySelectorAll('[data-delete]').forEach(btn => {
+    btn.onclick = async () => {
+      if (!confirm(`Delete user "${btn.dataset.name}"? This cannot be undone.`)) return;
+      try {
+        await apiJson(`/api/users/${btn.dataset.delete}`, { method: 'DELETE' });
+        load();
+      } catch (ex) { alert(ex.message); }
+    };
+  });
+  wrap.querySelectorAll('[data-reset]').forEach(btn => {
+    btn.onclick = () => openReset(btn.dataset.reset, btn.dataset.name);
+  });
+}
+
+document.getElementById('createBtn').onclick = async () => {
+  const errEl = document.getElementById('createError');
+  errEl.style.display = 'none';
+  try {
+    await apiJson('/api/users', {
+      method: 'POST',
+      body: {
+        username: document.getElementById('newUsername').value.trim(),
+        password: document.getElementById('newPassword').value,
+        role: document.getElementById('newRole').value,
+      },
+    });
+    document.getElementById('newUsername').value = '';
+    document.getElementById('newPassword').value = '';
+    document.getElementById('newRole').value = 'user';
+    load();
+  } catch (ex) {
+    errEl.textContent = ex.message; errEl.style.display = 'block';
+  }
+};
+
+function openReset(userId, name) {
+  resetUserId = userId;
+  document.getElementById('resetForUser').textContent = `For: ${name}`;
+  document.getElementById('resetPasswordInput').value = '';
+  document.getElementById('resetError').style.display = 'none';
+  document.getElementById('resetNote').style.display = 'none';
+  document.getElementById('resetOverlay').classList.add('open');
+}
+document.getElementById('closeReset').onclick = () => document.getElementById('resetOverlay').classList.remove('open');
+document.getElementById('resetOverlay').onclick = (e) => { if (e.target.id === 'resetOverlay') e.currentTarget.classList.remove('open'); };
+
+document.getElementById('confirmResetBtn').onclick = async () => {
+  const errEl = document.getElementById('resetError');
+  const noteEl = document.getElementById('resetNote');
+  errEl.style.display = 'none';
+  try {
+    await apiJson(`/api/users/${resetUserId}/reset-password`, {
+      method: 'POST', body: { new_password: document.getElementById('resetPasswordInput').value },
+    });
+    noteEl.textContent = 'Password updated.'; noteEl.style.display = 'block';
+    setTimeout(() => document.getElementById('resetOverlay').classList.remove('open'), 1200);
+  } catch (ex) {
+    errEl.textContent = ex.message; errEl.style.display = 'block';
+  }
+};
+</script>
+</body>
+</html>

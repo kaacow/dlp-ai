@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mail Exfil Detector — DLP AI Console</title>
+<link rel="icon" href="favicon.png" type="image/png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app-shell">
+  <div id="sidebarMount"></div>
+  <div class="content">
+    <div class="content-header">
+      <div><h1>Mail Exfil Detector</h1><div class="sub">Flags outgoing mail that looks like a self-send to a personal address, from DLP-captured mail or Exchange webmail trace.</div></div>
+      <a href="/history.html#mail" class="btn secondary" style="margin-left:auto;">Full history</a>
+    </div>
+    <div class="content-body">
+
+      <div class="subnav">
+        <a href="#" data-tab="exchange-gmail" class="active">Exchange — Gmail</a>
+        <a href="#" data-tab="exchange-mailru">Exchange — Mail.ru</a>
+        <a href="#" data-tab="corp-custom">Corporate (custom range)</a>
+        <a href="#" data-tab="corp-auto">Corporate (latest daily)</a>
+      </div>
+
+      <!-- Corp custom-range controls -->
+      <div class="card" id="corpCustomControls" style="display:none;">
+        <div class="field-row">
+          <div class="field"><label>From</label><input type="datetime-local" id="corpBegin"></div>
+          <div class="field"><label>To</label><input type="datetime-local" id="corpEnd"></div>
+          <div class="field"><label>User</label><select id="corpUserSelect"><option value="">All (account default)</option></select></div>
+          <div class="field"><label>Similarity threshold</label><input type="text" id="corpThreshold" value="0.5" style="width:80px;"></div>
+        </div>
+        <button class="btn" id="corpRunBtn" type="button">Run</button>
+        <span id="corpRunStatus" style="margin-left:12px; font-size:13px; color:var(--muted);"></span>
+      </div>
+
+      <!-- Exchange controls (shared by both domain tabs) -->
+      <div class="card" id="exchangeControls" style="display:none;">
+        <div class="field-row">
+          <div class="field"><label>From (day)</label><input type="date" id="exBegin"></div>
+          <div class="field"><label>To (day)</label><input type="date" id="exEnd"></div>
+          <div class="field"><label>Similarity threshold</label><input type="text" id="exThreshold" value="0.5" style="width:80px;"></div>
+        </div>
+        <button class="btn" id="exRunBtn" type="button">Run</button>
+        <span id="exRunStatus" style="margin-left:12px; font-size:13px; color:var(--muted);"></span>
+        <div style="margin-top:14px; padding-top:14px; border-top:1px solid var(--border); font-size:13px; color:var(--muted);">
+          Exchange automation not live, or session expired? Upload a message-trace CSV instead:
+          <div style="margin-top:8px; display:flex; gap:10px; align-items:center;">
+            <input type="date" id="exUploadDay">
+            <input type="file" id="exCsvFile" accept=".csv,.tsv,.txt">
+            <button class="btn secondary small" id="exUploadBtn" type="button">Upload</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px;">
+          <h3 style="margin:0;" id="resultsHeading">Flagged mail</h3>
+          <span id="scheduleLabel" class="schedule-badge"></span>
+        </div>
+        <div class="hist-controls" style="margin-top:14px;">
+          <select id="fMatchType" style="display:none;">
+            <option value="">All match types</option>
+            <option value="personal_domain_match">Personal address</option>
+            <option value="self_corporate">Self (corporate)</option>
+          </select>
+          <select id="fDlpStatus" style="display:none;">
+            <option value="">All DLP statuses</option>
+            <option value="unchecked">Not checked yet</option>
+            <option value="found">DLP copy found</option>
+            <option value="found_no_file">DLP logged, no file</option>
+            <option value="phone_sent">Phone sent</option>
+          </select>
+          <input type="search" id="fSearch" placeholder="Search sender, recipient, subject…">
+        </div>
+        <div id="tableWrap"></div>
+        <div class="pager">
+          <span id="pagerInfo" style="font-size:12.5px; color:var(--muted);"></span>
+          <button class="btn secondary" id="prevBtn">Previous</button>
+          <button class="btn secondary" id="nextBtn">Next</button>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<script src="common.js"></script>
+<script src="mail-common.js"></script>
+<script>
+const state = { tab: 'corp-auto', begin: null, end: null, limit: 50, offset: 0, matchType: '', dlpStatus: '', search: '', sort: 'time', dir: 'desc', domain: 'gmail.com' };
+let pollTimer = null;
+const tableWrapEl = document.getElementById('tableWrap');
+
+function ymd(date) {
+  const pad = n => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth()+1)}-${pad(date.getDate())}`;
+}
+
+// ---------------- tab switching ----------------
+document.querySelectorAll('.subnav a').forEach(a => {
+  a.onclick = (e) => {
+    e.preventDefault();
+    document.querySelectorAll('.subnav a').forEach(x => x.classList.remove('active'));
+    a.classList.add('active');
+    switchTab(a.dataset.tab);
+  };
+});
+
+function switchTab(tab) {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  state.tab = tab;
+  state.offset = 0;
+
+  document.getElementById('corpCustomControls').style.display = tab === 'corp-custom' ? 'block' : 'none';
+  document.getElementById('exchangeControls').style.display = tab.startsWith('exchange') ? 'block' : 'none';
+  document.getElementById('fMatchType').style.display = tab.startsWith('corp') ? 'inline-block' : 'none';
+  document.getElementById('fDlpStatus').style.display = tab.startsWith('exchange') ? 'inline-block' : 'none';
+  document.getElementById('resultsHeading').textContent = tab.startsWith('exchange') ? 'Flagged mail' : 'Flagged mail';
+
+  if (tab === 'exchange-gmail') state.domain = 'gmail.com';
+  if (tab === 'exchange-mailru') state.domain = 'mail.ru';
+
+  if (tab === 'corp-auto') {
+    const range = computeMailScheduleRange();
+    const api_range = toApiDateRange(range);
+    state.begin = api_range.begin; state.end = api_range.end;
+    setScheduleLabel('scheduleLabel', 'Scheduled results: ', formatScheduleLabel(range));
+    loadEvents();
+  } else if (tab === 'corp-custom') {
+    state.begin = null; state.end = null;
+    setScheduleLabel('scheduleLabel', '', '');
+    tableWrapEl.innerHTML = `<div class="empty-state">Pick a range above and hit Run.</div>`;
+    updatePager({ total: 0, events: [] });
+  } else {
+    const range = computeMailScheduleRange();
+    const api_range = toApiDateRange(range);
+    state.begin = api_range.begin; state.end = api_range.end;
+    setScheduleLabel('scheduleLabel', 'Scheduled results: ', formatScheduleLabel(range));
+    loadExchangeEvents();
+  }
+}
+
+// ---------------- corporate: run + events (shared auto/custom) ----------------
+async function loadEvents() {
+  const params = new URLSearchParams({ limit: state.limit, offset: state.offset, sort: state.sort, dir: state.dir });
+  if (state.begin) params.set('begin', state.begin);
+  if (state.end) params.set('end', state.end);
+  if (state.matchType) params.set('match_type', state.matchType);
+  if (state.search) params.set('search', state.search);
+  const data = await (await api('/api/mail/events?' + params.toString())).json();
+  renderCorpTable(tableWrapEl, data);
+  wireTableSort(tableWrapEl, state, reload);
+  updatePager(data);
+}
+
+// ---------------- exchange ----------------
+async function loadExchangeEvents() {
+  const params = new URLSearchParams({ domain: state.domain, limit: state.limit, offset: state.offset, sort: state.sort, dir: state.dir });
+  if (state.begin) params.set('begin', state.begin);
+  if (state.end) params.set('end', state.end);
+  if (state.dlpStatus) params.set('dlp_status', state.dlpStatus);
+  if (state.search) params.set('search', state.search);
+  const data = await (await api('/api/exchange/events?' + params.toString())).json();
+  renderExchangeTable(tableWrapEl, data);
+  wireTableSort(tableWrapEl, state, reload);
+  updatePager(data);
+}
+
+// ---------------- shared: pager ----------------
+function updatePager(data) {
+  document.getElementById('pagerInfo').textContent = `${data.total ? state.offset + 1 : 0}–${Math.min(state.offset + (data.events ? data.events.length : 0), data.total)} of ${data.total}`;
+  document.getElementById('prevBtn').disabled = state.offset === 0;
+  document.getElementById('nextBtn').disabled = state.offset + state.limit >= data.total;
+}
+function reload() {
+  if (state.tab.startsWith('exchange')) loadExchangeEvents();
+  else if (state.tab === 'corp-custom' && !state.begin) { /* nothing run yet */ }
+  else loadEvents();
+}
+document.getElementById('fMatchType').onchange = e => { state.matchType = e.target.value; state.offset = 0; loadEvents(); };
+document.getElementById('fDlpStatus').onchange = e => { state.dlpStatus = e.target.value; state.offset = 0; loadExchangeEvents(); };
+let searchDebounce;
+document.getElementById('fSearch').oninput = e => {
+  clearTimeout(searchDebounce);
+  searchDebounce = setTimeout(() => { state.search = e.target.value; state.offset = 0; reload(); }, 300);
+};
+document.getElementById('prevBtn').onclick = () => { state.offset = Math.max(0, state.offset - state.limit); reload(); };
+document.getElementById('nextBtn').onclick = () => { state.offset += state.limit; reload(); };
+
+// ---------------- corp custom-range run ----------------
+document.getElementById('corpRunBtn').onclick = async () => {
+  const begin = document.getElementById('corpBegin').value.replace('T', ' ') + ':00';
+  const end = document.getElementById('corpEnd').value.replace('T', ' ') + ':59';
+  if (!document.getElementById('corpBegin').value || !document.getElementById('corpEnd').value) { alert('Pick a From/To range first.'); return; }
+  const locationIds = document.getElementById('corpUserSelect').value;
+  const threshold = parseFloat(document.getElementById('corpThreshold').value) || 0.5;
+  const btn = document.getElementById('corpRunBtn');
+  const statusEl = document.getElementById('corpRunStatus');
+  btn.disabled = true;
+  const params = new URLSearchParams({ begin, end, location_ids: locationIds, threshold });
+  const r = await (await api('/api/mail/runs?' + params.toString(), { method: 'POST' })).json();
+  if (r.started === false) { statusEl.textContent = r.message; btn.disabled = false; return; }
+  statusEl.textContent = 'starting…';
+  pollTimer = setInterval(async () => {
+    const run = await (await api('/api/mail/runs/' + r.run_id)).json();
+    if (run.status === 'running') {
+      statusEl.textContent = `running — seen ${run.mails_seen||0} · flagged ${run.mails_flagged||0}`;
+    } else {
+      clearInterval(pollTimer); pollTimer = null;
+      statusEl.textContent = run.status === 'failed' ? `run failed: ${(run.error||'').slice(0,150)}` : `done — seen ${run.mails_seen||0} · flagged ${run.mails_flagged||0}`;
+      btn.disabled = false;
+      state.begin = begin; state.end = end; state.offset = 0;
+      setScheduleLabel('scheduleLabel', 'Custom range: ', `${begin} – ${end}`);
+      loadEvents();
+    }
+  }, 1500);
+};
+
+// ---------------- exchange run + upload ----------------
+document.getElementById('exRunBtn').onclick = async () => {
+  const begin = document.getElementById('exBegin').value;
+  const end = document.getElementById('exEnd').value || begin;
+  if (!begin) { alert('Pick a From date first.'); return; }
+  const threshold = parseFloat(document.getElementById('exThreshold').value) || 0.5;
+  const btn = document.getElementById('exRunBtn');
+  const statusEl = document.getElementById('exRunStatus');
+  btn.disabled = true;
+  const params = new URLSearchParams({ domain: state.domain, begin_day: begin, end_day: end, threshold });
+  const r = await (await api('/api/exchange/runs?' + params.toString(), { method: 'POST' })).json();
+  if (r.started === false) { statusEl.textContent = r.message; btn.disabled = false; return; }
+  statusEl.textContent = 'starting…';
+  pollTimer = setInterval(async () => {
+    const runs = await (await api(`/api/exchange/runs?domain=${encodeURIComponent(state.domain)}&limit=10`)).json();
+    const latest = runs[0];
+    if (latest && latest.status === 'running') {
+      statusEl.textContent = `running — seen ${latest.mails_seen||0} · flagged ${latest.mails_flagged||0}`;
+    } else {
+      clearInterval(pollTimer); pollTimer = null;
+      statusEl.textContent = latest ? `done — seen ${latest.mails_seen||0} · flagged ${latest.mails_flagged||0}` : 'done';
+      btn.disabled = false;
+      state.begin = begin + ' 00:00:00'; state.end = end + ' 23:59:59'; state.offset = 0;
+      setScheduleLabel('scheduleLabel', 'Custom range: ', `${begin} – ${end}`);
+      loadExchangeEvents();
+    }
+  }, 1500);
+};
+
+document.getElementById('exUploadBtn').onclick = async () => {
+  const fileInput = document.getElementById('exCsvFile');
+  const day = document.getElementById('exUploadDay').value;
+  if (!fileInput.files.length) { alert('Choose a CSV file first.'); return; }
+  if (!day) { alert('Pick the day this CSV covers.'); return; }
+  const threshold = parseFloat(document.getElementById('exThreshold').value) || 0.5;
+  const form = new FormData();
+  form.append('domain', state.domain);
+  form.append('day', day);
+  form.append('threshold', threshold);
+  form.append('file', fileInput.files[0]);
+  const btn = document.getElementById('exUploadBtn');
+  btn.disabled = true;
+  const res = await api('/api/exchange/runs/upload', { method: 'POST', body: form });
+  const r = await res.json();
+  const statusEl = document.getElementById('exRunStatus');
+  if (r.started === false) { statusEl.textContent = r.message; btn.disabled = false; return; }
+  statusEl.textContent = 'processing upload…';
+  setTimeout(() => {
+    btn.disabled = false;
+    state.begin = day + ' 00:00:00'; state.end = day + ' 23:59:59'; state.offset = 0;
+    setScheduleLabel('scheduleLabel', 'Custom range: ', day);
+    loadExchangeEvents();
+  }, 2000);
+};
+
+// ---------------- init ----------------
+(async () => {
+  await initPage('mail');
+  setInputToDate(document.getElementById('corpBegin'), new Date(), false);
+  setInputToDate(document.getElementById('corpEnd'), new Date(), true);
+  const yesterday = new Date(); yesterday.setDate(yesterday.getDate() - 1);
+  document.getElementById('exBegin').value = ymd(yesterday);
+  document.getElementById('exEnd').value = ymd(yesterday);
+  document.getElementById('exUploadDay').value = ymd(yesterday);
+
+  // Switch to the default tab right away — the EMP location lookup below
+  // can be slow, and previously ran BEFORE this call, so a user clicking a
+  // different tab while it was still in flight could get silently overwritten
+  // the moment it finally resolved and called switchTab() again. Populating
+  // the user dropdown doesn't need to block the initial tab render at all.
+  switchTab('exchange-gmail');
+
+  try {
+    const locs = await (await api('/api/mail/locations')).json();
+    const select = document.getElementById('corpUserSelect');
+    for (const u of locs.users) {
+      const opt = document.createElement('option');
+      opt.value = u.location_id;
+      opt.textContent = `${u.fullname || u.username} (${u.username})`;
+      select.appendChild(opt);
+    }
+  } catch (e) { console.error('Could not load user list', e); }
+})();
+
+function setInputToDate(inputEl, date, endOfDay) {
+  const pad = n => String(n).padStart(2, '0');
+  const d = `${date.getFullYear()}-${pad(date.getMonth()+1)}-${pad(date.getDate())}`;
+  inputEl.value = `${d}T${endOfDay ? '23:59' : '00:00'}`;
+}
+</script>
+</body>
+</html>

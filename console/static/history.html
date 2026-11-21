@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>History — DLP AI Console</title>
+<link rel="icon" href="favicon.png" type="image/png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app-shell">
+  <div id="sidebarMount"></div>
+  <div class="content">
+    <div class="content-header"><div><h1>History</h1><div class="sub">Browse and search every scan on record — not just today's scheduled view.</div></div></div>
+    <div class="content-body">
+
+      <div class="subnav">
+        <a href="#" data-htab="secrets" class="active">Secret Scanner</a>
+        <a href="#" data-htab="mail">Mail Exfil</a>
+      </div>
+
+      <!-- ===== Secret Scanner history ===== -->
+      <div id="panelSecrets" class="card">
+        <div class="hist-controls">
+          <select id="secStatus">
+            <option value="">All statuses</option>
+            <option value="scanned">Scanned</option>
+            <option value="skipped_not_code">Skipped — not code</option>
+            <option value="skipped_no_copy">Skipped — no saved copy</option>
+            <option value="error">Error</option>
+          </select>
+          <select id="secSeverity">
+            <option value="">All severities</option>
+            <option value="high">High</option>
+            <option value="medium">Medium</option>
+            <option value="low">Low</option>
+          </select>
+          <input type="search" id="secSearch" placeholder="Search filename, destination, user…">
+          <select id="secPageSize">
+            <option value="50" selected>50 / page</option>
+            <option value="100">100 / page</option>
+            <option value="200">200 / page</option>
+          </select>
+        </div>
+        <div id="secTableWrap"></div>
+        <div class="pager">
+          <span id="secPagerInfo" style="font-size:12.5px; color:var(--muted);"></span>
+          <button class="btn secondary" id="secPrevBtn">Previous</button>
+          <button class="btn secondary" id="secNextBtn">Next</button>
+        </div>
+      </div>
+
+      <!-- ===== Mail Exfil history ===== -->
+      <div id="panelMail" class="card" style="display:none;">
+        <div class="hist-controls">
+          <select id="mailSource">
+            <option value="corp">Corporate</option>
+            <option value="gmail.com">Exchange — Gmail</option>
+            <option value="mail.ru">Exchange — Mail.ru</option>
+          </select>
+          <select id="mailMatchType" style="display:none;">
+            <option value="">All match types</option>
+            <option value="personal_domain_match">Personal address</option>
+            <option value="self_corporate">Self (corporate)</option>
+          </select>
+          <select id="mailDlpStatus" style="display:none;">
+            <option value="">All DLP statuses</option>
+            <option value="unchecked">Not checked yet</option>
+            <option value="found">DLP copy found</option>
+            <option value="found_no_file">DLP logged, no file</option>
+            <option value="phone_sent">Phone sent</option>
+          </select>
+          <input type="search" id="mailSearch" placeholder="Search sender, recipient, subject…">
+          <select id="mailPageSize">
+            <option value="50" selected>50 / page</option>
+            <option value="100">100 / page</option>
+            <option value="200">200 / page</option>
+          </select>
+        </div>
+        <div id="mailTableWrap"></div>
+        <div class="pager">
+          <span id="mailPagerInfo" style="font-size:12.5px; color:var(--muted);"></span>
+          <button class="btn secondary" id="mailPrevBtn">Previous</button>
+          <button class="btn secondary" id="mailNextBtn">Next</button>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="overlay">
+  <div class="detail-panel" id="detailPanel" style="max-width:760px;"></div>
+</div>
+
+<script src="common.js"></script>
+<script src="secrets-common.js"></script>
+<script src="mail-common.js"></script>
+<script>
+// ---------------- tab switching ----------------
+document.querySelectorAll('.subnav a[data-htab]').forEach(a => {
+  a.onclick = (e) => {
+    e.preventDefault();
+    document.querySelectorAll('.subnav a[data-htab]').forEach(x => x.classList.remove('active'));
+    a.classList.add('active');
+    switchHTab(a.dataset.htab);
+  };
+});
+
+function switchHTab(tab) {
+  document.getElementById('panelSecrets').style.display = tab === 'secrets' ? 'block' : 'none';
+  document.getElementById('panelMail').style.display = tab === 'mail' ? 'block' : 'none';
+  window.location.hash = tab;
+  if (tab === 'secrets') loadSecretsHistory();
+  else loadMailHistory();
+}
+
+// ===================== Secret Scanner history =====================
+const secState = { limit: 50, offset: 0, severity: '', scanStatus: '', search: '' };
+const secTableWrapEl = document.getElementById('secTableWrap');
+
+async function loadSecretsHistory() {
+  const params = new URLSearchParams({ limit: secState.limit, offset: secState.offset });
+  if (secState.severity) params.set('severity', secState.severity);
+  if (secState.scanStatus) params.set('scan_status', secState.scanStatus);
+  if (secState.search) params.set('search', secState.search);
+  const data = await (await api('/api/secrets/files?' + params.toString())).json();
+  renderSecretsTable(secTableWrapEl, data, 'No scans found.');
+  document.getElementById('secPagerInfo').textContent = `${data.total ? secState.offset + 1 : 0}–${Math.min(secState.offset + data.files.length, data.total)} of ${data.total}`;
+  document.getElementById('secPrevBtn').disabled = secState.offset === 0;
+  document.getElementById('secNextBtn').disabled = secState.offset + secState.limit >= data.total;
+}
+document.getElementById('secSeverity').onchange = e => { secState.severity = e.target.value; secState.offset = 0; loadSecretsHistory(); };
+document.getElementById('secStatus').onchange = e => { secState.scanStatus = e.target.value; secState.offset = 0; loadSecretsHistory(); };
+document.getElementById('secPageSize').onchange = e => { secState.limit = parseInt(e.target.value); secState.offset = 0; loadSecretsHistory(); };
+let secSearchDebounce;
+document.getElementById('secSearch').oninput = e => {
+  clearTimeout(secSearchDebounce);
+  secSearchDebounce = setTimeout(() => { secState.search = e.target.value; secState.offset = 0; loadSecretsHistory(); }, 300);
+};
+document.getElementById('secPrevBtn').onclick = () => { secState.offset = Math.max(0, secState.offset - secState.limit); loadSecretsHistory(); };
+document.getElementById('secNextBtn').onclick = () => { secState.offset += secState.limit; loadSecretsHistory(); };
+
+// ===================== Mail Exfil history =====================
+const mailState = { source: 'corp', limit: 50, offset: 0, matchType: '', dlpStatus: '', search: '', sort: 'time', dir: 'desc' };
+const mailTableWrapEl = document.getElementById('mailTableWrap');
+
+async function loadMailHistory() {
+  if (mailState.source === 'corp') {
+    const params = new URLSearchParams({ limit: mailState.limit, offset: mailState.offset, sort: mailState.sort, dir: mailState.dir });
+    if (mailState.matchType) params.set('match_type', mailState.matchType);
+    if (mailState.search) params.set('search', mailState.search);
+    const data = await (await api('/api/mail/events?' + params.toString())).json();
+    renderCorpTable(mailTableWrapEl, data);
+    wireTableSort(mailTableWrapEl, mailState, loadMailHistory);
+    updateMailPager(data);
+  } else {
+    const params = new URLSearchParams({ domain: mailState.source, limit: mailState.limit, offset: mailState.offset, sort: mailState.sort, dir: mailState.dir });
+    if (mailState.dlpStatus) params.set('dlp_status', mailState.dlpStatus);
+    if (mailState.search) params.set('search', mailState.search);
+    const data = await (await api('/api/exchange/events?' + params.toString())).json();
+    renderExchangeTable(mailTableWrapEl, data);
+    wireTableSort(mailTableWrapEl, mailState, loadMailHistory);
+    updateMailPager(data);
+  }
+}
+function updateMailPager(data) {
+  document.getElementById('mailPagerInfo').textContent = `${data.total ? mailState.offset + 1 : 0}–${Math.min(mailState.offset + data.events.length, data.total)} of ${data.total}`;
+  document.getElementById('mailPrevBtn').disabled = mailState.offset === 0;
+  document.getElementById('mailNextBtn').disabled = mailState.offset + mailState.limit >= data.total;
+}
+document.getElementById('mailSource').onchange = e => {
+  mailState.source = e.target.value;
+  mailState.offset = 0;
+  document.getElementById('mailMatchType').style.display = mailState.source === 'corp' ? 'inline-block' : 'none';
+  document.getElementById('mailDlpStatus').style.display = mailState.source !== 'corp' ? 'inline-block' : 'none';
+  loadMailHistory();
+};
+document.getElementById('mailMatchType').onchange = e => { mailState.matchType = e.target.value; mailState.offset = 0; loadMailHistory(); };
+document.getElementById('mailDlpStatus').onchange = e => { mailState.dlpStatus = e.target.value; mailState.offset = 0; loadMailHistory(); };
+document.getElementById('mailPageSize').onchange = e => { mailState.limit = parseInt(e.target.value); mailState.offset = 0; loadMailHistory(); };
+let mailSearchDebounce;
+document.getElementById('mailSearch').oninput = e => {
+  clearTimeout(mailSearchDebounce);
+  mailSearchDebounce = setTimeout(() => { mailState.search = e.target.value; mailState.offset = 0; loadMailHistory(); }, 300);
+};
+document.getElementById('mailPrevBtn').onclick = () => { mailState.offset = Math.max(0, mailState.offset - mailState.limit); loadMailHistory(); };
+document.getElementById('mailNextBtn').onclick = () => { mailState.offset += mailState.limit; loadMailHistory(); };
+
+document.getElementById('overlay').onclick = (e) => { if (e.target.id === 'overlay') closeSecretsDetail(); };
+
+// ---------------- init ----------------
+(async () => {
+  await initPage('history');
+  const initialTab = window.location.hash === '#mail' ? 'mail' : 'secrets';
+  document.querySelectorAll('.subnav a[data-htab]').forEach(a => a.classList.toggle('active', a.dataset.htab === initialTab));
+  document.getElementById('panelSecrets').style.display = initialTab === 'secrets' ? 'block' : 'none';
+  document.getElementById('panelMail').style.display = initialTab === 'mail' ? 'block' : 'none';
+  if (initialTab === 'secrets') loadSecretsHistory(); else loadMailHistory();
+})();
+</script>
+</body>
+</html>

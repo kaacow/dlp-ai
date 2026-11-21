@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DLP AI — First-time setup</title>
+<link rel="icon" href="favicon.png" type="image/png">
+<link rel="stylesheet" href="common.css">
+<style>
+  .auth-wrap { max-width: 380px; margin: 90px auto; padding: 0 20px; }
+  .auth-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 28px; }
+  .auth-card h1 { font-family: var(--serif); font-size: 24px; margin: 0 0 6px; }
+  .auth-card .sub { color: var(--muted); font-size: 13.5px; margin-bottom: 22px; }
+  .auth-field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 14px; }
+  .auth-field label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .auth-field input { font-size: 14px; padding: 9px 11px; border: 1px solid var(--border); border-radius: 7px;
+    background: var(--bg); color: var(--ink); }
+  .auth-btn { width: 100%; background: var(--accent); color: var(--surface); border: none; border-radius: 8px;
+    padding: 11px; font-size: 14px; font-weight: 600; margin-top: 6px; }
+  .auth-btn:disabled { opacity: 0.6; }
+  .auth-error { color: var(--bad); font-size: 13px; margin-top: 10px; }
+  .auth-note { background: var(--accent-soft); border-radius: 8px; padding: 12px 14px; font-size: 12.5px;
+    color: var(--muted); margin-bottom: 18px; }
+</style>
+</head>
+<body>
+<div class="auth-wrap">
+  <div class="auth-card">
+    <h1>Welcome — create the admin account</h1>
+    <div class="sub">This runs once. This account becomes the permanent primary admin — it can never be demoted or deleted by anyone, including other admins.</div>
+    <div class="auth-note">No one else can see what you type here — this page only works while zero accounts exist, and disables itself the moment this account is created.</div>
+    <form id="setupForm">
+      <div class="auth-field"><label>Username</label><input type="text" id="username" autocomplete="username" required></div>
+      <div class="auth-field"><label>Password (min 8 characters)</label><input type="password" id="password" autocomplete="new-password" required minlength="8"></div>
+      <div class="auth-field"><label>Confirm password</label><input type="password" id="password2" autocomplete="new-password" required minlength="8"></div>
+      <button class="auth-btn" type="submit">Create admin account</button>
+      <div class="auth-error" id="err"></div>
+    </form>
+  </div>
+</div>
+<script>
+async function checkStatus() {
+  const res = await fetch('/api/auth/status');
+  const data = await res.json();
+  if (!data.setup_required) window.location.href = '/login.html';
+}
+checkStatus();
+
+document.getElementById('setupForm').onsubmit = async (e) => {
+  e.preventDefault();
+  const err = document.getElementById('err');
+  err.textContent = '';
+  const username = document.getElementById('username').value.trim();
+  const password = document.getElementById('password').value;
+  const password2 = document.getElementById('password2').value;
+  if (password !== password2) { err.textContent = 'Passwords do not match.'; return; }
+  const btn = e.target.querySelector('button');
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/auth/setup', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.detail || 'Setup failed');
+    }
+    window.location.href = '/';
+  } catch (ex) {
+    err.textContent = ex.message;
+    btn.disabled = false;
+  }
+};
+</script>
+</body>
+</html>

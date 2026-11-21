@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>File Analyzer History — DLP AI Console</title>
+<link rel="icon" href="favicon.png" type="image/png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app-shell">
+  <div id="sidebarMount"></div>
+  <div class="content">
+    <div class="content-header">
+      <div><h1>File Analyzer History</h1><div class="sub">Saved scans from the File Analyzer.</div></div>
+      <a href="/files.html" class="btn secondary" style="margin-left:auto;">Analyze a file</a>
+    </div>
+    <div class="content-body">
+
+      <div class="card">
+        <div class="hist-controls">
+          <select id="minScore">
+            <option value="">All risk scores</option>
+            <option value="75">High risk only (75+)</option>
+            <option value="40">Moderate+ (40+)</option>
+          </select>
+          <select id="companyFilter">
+            <option value="">All files</option>
+            <option value="true">Related to company only</option>
+            <option value="false">Not related to company</option>
+          </select>
+          <select id="pageSize">
+            <option value="25">25 / page</option>
+            <option value="50" selected>50 / page</option>
+            <option value="100">100 / page</option>
+          </select>
+        </div>
+        <div id="tableWrap"></div>
+        <div class="pager">
+          <button class="btn secondary" id="prevBtn">Previous</button>
+          <span id="pageInfo" style="font-size:12.5px; color:var(--muted);"></span>
+          <button class="btn secondary" id="nextBtn">Next</button>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="overlay">
+  <div class="detail-panel" id="detailPanel"></div>
+</div>
+
+<script src="common.js"></script>
+<script src="files-common.js"></script>
+<script>
+let offset = 0;
+let limit = 50;
+let total = 0;
+
+document.getElementById('minScore').onchange = () => { offset = 0; load(); };
+document.getElementById('companyFilter').onchange = () => { offset = 0; load(); };
+document.getElementById('pageSize').onchange = (e) => { limit = parseInt(e.target.value); offset = 0; load(); };
+document.getElementById('prevBtn').onclick = () => { offset = Math.max(0, offset - limit); load(); };
+document.getElementById('nextBtn').onclick = () => { if (offset + limit < total) { offset += limit; load(); } };
+document.getElementById('overlay').onclick = (e) => { if (e.target.id === 'overlay') closeDetail(); };
+
+async function load() {
+  const minScore = document.getElementById('minScore').value;
+  const companyFilter = document.getElementById('companyFilter').value;
+  const params = new URLSearchParams({ limit, offset });
+  if (minScore) params.set('min_score', minScore);
+  if (companyFilter) params.set('related_to_company', companyFilter);
+  const data = await (await api(`/api/files/history?${params}`)).json();
+  total = data.total;
+  renderTable(data.scans);
+  document.getElementById('pageInfo').textContent =
+    total === 0 ? '' : `${offset + 1}–${Math.min(offset + limit, total)} of ${total}`;
+  document.getElementById('prevBtn').disabled = offset === 0;
+  document.getElementById('nextBtn').disabled = offset + limit >= total;
+}
+
+function renderTable(scans) {
+  const wrap = document.getElementById('tableWrap');
+  if (!scans.length) {
+    wrap.innerHTML = '<div class="empty-state">No saved scans yet.</div>';
+    return;
+  }
+  wrap.innerHTML = `<table class="data-table">
+    <thead><tr><th>File</th><th>Score</th><th>Action</th><th>Company</th><th>Categories</th><th>Date</th><th></th></tr></thead>
+    <tbody>
+      ${scans.map(s => `
+        <tr class="clickable" data-id="${s.id}">
+          <td class="name-cell">${escapeHtml(s.filename)}</td>
+          <td>${s.risk_score != null ? `<span class="score-badge ${scoreClass(s.risk_score)}" style="width:34px;height:34px;font-size:13px;">${s.risk_score}</span>` : '—'}</td>
+          <td>${s.recommended_action ? `<span class="pill action-${s.recommended_action}">${escapeHtml(s.recommended_action)}</span>` : (s.error ? '<span class="pill">error</span>' : '—')}</td>
+          <td>${s.related_to_company ? '<span class="pill company">yes</span>' : (s.related_to_company === false ? '—' : '')}</td>
+          <td>${(s.categories || []).map(c => `<span class="pill cat">${escapeHtml(categoryLabel(c))}</span>`).join('')}</td>
+          <td>${fmtDate(s.created_at)}</td>
+          <td><button class="btn secondary" data-delete-row="${s.id}">Delete</button></td>
+        </tr>
+      `).join('')}
+    </tbody>
+  </table>`;
+  wrap.querySelectorAll('tr.clickable').forEach(row => {
+    row.addEventListener('click', (e) => {
+      if (e.target.closest('[data-delete-row]')) return;
+      openDetail(row.dataset.id);
+    });
+  });
+  wrap.querySelectorAll('[data-delete-row]').forEach(btn => {
+    btn.onclick = async (e) => {
+      e.stopPropagation();
+      if (!confirm('Delete this scan from history?')) return;
+      await api(`/api/files/history/${btn.dataset.deleteRow}`, { method: 'DELETE' });
+      load();
+    };
+  });
+}
+
+async function openDetail(id) {
+  const scan = await (await api(`/api/files/history/${id}`)).json();
+  const panel = document.getElementById('detailPanel');
+  panel.innerHTML = `<button class="close-btn" id="closeDetail">✕</button>${renderResultCard(scan, { showDelete: true })}`;
+  document.getElementById('closeDetail').onclick = closeDetail;
+  panel.querySelectorAll('[data-delete-scan]').forEach(btn => {
+    btn.onclick = async () => {
+      if (!confirm('Delete this scan from history?')) return;
+      await api(`/api/files/history/${btn.dataset.deleteScan}`, { method: 'DELETE' });
+      closeDetail();
+      load();
+    };
+  });
+  document.getElementById('overlay').classList.add('open');
+  if (!scan.error && scan.risk_score != null) initChatUI(scan.id);
+}
+
+function closeDetail() {
+  document.getElementById('overlay').classList.remove('open');
+}
+
+(async () => {
+  await initPage(null);
+  load();
+})();
+</script>
+</body>
+</html>

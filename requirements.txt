@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+pydantic
+bcrypt
+requests
+urllib3
+pandas
+openpyxl
+python-docx
+python-pptx
+PyMuPDF
+Pillow
+extract-msg
+playwright

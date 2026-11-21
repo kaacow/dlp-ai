@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Account Settings — DLP AI Console</title>
+<link rel="icon" href="favicon.png" type="image/png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app-shell">
+  <div id="sidebarMount"></div>
+  <div class="content">
+    <div class="content-header"><div><h1>Account Settings</h1><div class="sub">Manage your profile, password, and session preferences.</div></div></div>
+    <div class="content-body narrow">
+
+      <div class="card">
+        <h3 style="margin-top:0;">Profile</h3>
+        <div style="display:flex; align-items:center; gap:16px; margin-bottom:18px;">
+          <div id="pictureWrap" class="account-avatar" style="width:64px;height:64px;font-size:20px;"></div>
+          <div>
+            <input type="file" id="pictureInput" accept="image/*" style="display:none;">
+            <button class="btn secondary small" id="pictureBtn" type="button">Change picture</button>
+          </div>
+        </div>
+        <div class="field">
+          <label>Username (login, cannot be changed)</label>
+          <input type="text" id="usernameField" disabled>
+        </div>
+        <div class="field">
+          <label>Display name</label>
+          <input type="text" id="displayNameField">
+        </div>
+        <button class="btn" id="saveNameBtn" type="button">Save</button>
+        <div class="form-note" id="nameNote" style="display:none;"></div>
+      </div>
+
+      <div class="card">
+        <h3 style="margin-top:0;">Session</h3>
+        <div class="field">
+          <label>Default "stay signed in" duration (used next time you log in)</label>
+          <select id="durationField">
+            <option value="6h">6 hours</option>
+            <option value="12h">12 hours</option>
+            <option value="24h">24 hours</option>
+            <option value="never">Never expire</option>
+          </select>
+        </div>
+        <button class="btn" id="saveDurationBtn" type="button">Save</button>
+        <div class="form-note" id="durationNote" style="display:none;"></div>
+      </div>
+
+      <div class="card">
+        <h3 style="margin-top:0;">Change password</h3>
+        <div class="field"><label>Current password</label><input type="password" id="currentPassword"></div>
+        <div class="field"><label>New password</label><input type="password" id="newPassword" minlength="8"></div>
+        <div class="field"><label>Confirm new password</label><input type="password" id="newPassword2" minlength="8"></div>
+        <button class="btn" id="changePasswordBtn" type="button">Change password</button>
+        <div class="form-error" id="passwordError" style="display:none;"></div>
+        <div class="form-note" id="passwordNote" style="display:none;"></div>
+      </div>
+
+      <div class="card">
+        <button class="btn secondary" id="pageLogoutBtn" type="button">Log out</button>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<script src="common.js"></script>
+<script>
+(async () => {
+  await initPage(null);
+  const u = window.currentUser;
+  document.getElementById('usernameField').value = u.username;
+  document.getElementById('displayNameField').value = u.display_name;
+  document.getElementById('durationField').value = u.default_session_duration;
+  renderPicture();
+
+  function renderPicture() {
+    const wrap = document.getElementById('pictureWrap');
+    if (u.profile_picture) {
+      wrap.innerHTML = `<img src="/api/profile-pictures/${encodeURIComponent(u.profile_picture)}" style="width:100%;height:100%;border-radius:50%;object-fit:cover;">`;
+    } else {
+      wrap.textContent = initials(u.display_name);
+    }
+  }
+
+  document.getElementById('pictureBtn').onclick = () => document.getElementById('pictureInput').click();
+  document.getElementById('pictureInput').onchange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const form = new FormData();
+    form.append('file', file);
+    const res = await api('/api/me/profile-picture', { method: 'POST', body: form });
+    const data = await res.json();
+    u.profile_picture = data.profile_picture;
+    renderPicture();
+  };
+
+  document.getElementById('saveNameBtn').onclick = async () => {
+    const note = document.getElementById('nameNote');
+    try {
+      await apiJson('/api/me', { method: 'PATCH', body: { display_name: document.getElementById('displayNameField').value.trim() } });
+      note.textContent = 'Saved.'; note.style.display = 'block';
+      setTimeout(() => note.style.display = 'none', 2500);
+    } catch (ex) { alert(ex.message); }
+  };
+
+  document.getElementById('saveDurationBtn').onclick = async () => {
+    const note = document.getElementById('durationNote');
+    try {
+      await apiJson('/api/me', { method: 'PATCH', body: { default_session_duration: document.getElementById('durationField').value } });
+      note.textContent = 'Saved. Applies next time you log in.'; note.style.display = 'block';
+      setTimeout(() => note.style.display = 'none', 3000);
+    } catch (ex) { alert(ex.message); }
+  };
+
+  document.getElementById('changePasswordBtn').onclick = async () => {
+    const errEl = document.getElementById('passwordError');
+    const noteEl = document.getElementById('passwordNote');
+    errEl.style.display = 'none'; noteEl.style.display = 'none';
+    const current = document.getElementById('currentPassword').value;
+    const next = document.getElementById('newPassword').value;
+    const next2 = document.getElementById('newPassword2').value;
+    if (next !== next2) { errEl.textContent = 'New passwords do not match.'; errEl.style.display = 'block'; return; }
+    try {
+      await apiJson('/api/me/password', { method: 'POST', body: { current_password: current, new_password: next } });
+      noteEl.textContent = 'Password changed.'; noteEl.style.display = 'block';
+      document.getElementById('currentPassword').value = '';
+      document.getElementById('newPassword').value = '';
+      document.getElementById('newPassword2').value = '';
+    } catch (ex) {
+      errEl.textContent = ex.message; errEl.style.display = 'block';
+    }
+  };
+
+  document.getElementById('pageLogoutBtn').onclick = async () => {
+    await fetch('/api/auth/logout', { method: 'POST' });
+    window.location.href = '/login.html';
+  };
+})();
+</script>
+</body>
+</html>

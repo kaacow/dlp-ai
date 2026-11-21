@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DLP AI — All Events</title>
+<link rel="icon" href="favicon.png" type="image/png">
+<link rel="stylesheet" href="common.css">
+</head>
+<body>
+<div class="wrap">
+  <nav class="topnav">
+    <div class="nav-left">
+      <a href="/" class="active">All Events</a>
+      <a href="/employees.html">By Employee</a>
+    </div>
+    <div class="account-widget" id="accountWidget"></div>
+  </nav>
+
+  <header class="top">
+    <div class="title-row">
+      <div class="brand-row">
+        <span class="brand-logo-text">DLP AI</span>
+        <div>
+          <h1>DLP AI</h1>
+          <div class="sub">File-send event triage &amp; investigation — Track B rules + Track C agentic review</div>
+        </div>
+      </div>
+    </div>
+    <div class="run-controls">
+      <div class="field">
+        <label>From</label>
+        <input type="datetime-local" id="runBegin">
+      </div>
+      <div class="field">
+        <label>To</label>
+        <input type="datetime-local" id="runEnd">
+      </div>
+      <button class="run-btn" id="runBtn">Run analysis</button>
+      <span class="run-status" id="runStatus"></span>
+    </div>
+  </header>
+
+  <div class="stat-row" id="statRow"></div>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>All events</h2>
+      <span class="hint" id="rangeHint">Showing events in the From/To range above.</span>
+    </div>
+    <div class="filter-bar">
+      <select id="fVerdict"><option value="">All verdicts</option></select>
+      <select id="fSeverity"><option value="">All severities</option></select>
+      <input type="search" id="fSearch" placeholder="Search filename, destination, reasoning…">
+      <label style="display:flex; align-items:center; gap:6px; font-size:13px; color:var(--muted); cursor:pointer;">
+        <input type="checkbox" id="fUseRange" checked> Limit to From/To range
+      </label>
+    </div>
+
+    <table>
+      <thead><tr>
+        <th class="sortable" data-col="event_time" data-scope="events">Time <span class="arrow"></span></th>
+        <th>Employee</th>
+        <th class="sortable" data-col="file_name" data-scope="events">File <span class="arrow"></span></th>
+        <th class="sortable" data-col="app_desc" data-scope="events">Destination <span class="arrow"></span></th>
+        <th>Verdict</th>
+        <th class="sortable" data-col="severity" data-scope="events">Severity <span class="arrow"></span></th>
+        <th>Action</th>
+      </tr></thead>
+      <tbody id="eventsBody"></tbody>
+    </table>
+    <div class="pager">
+      <span id="pagerInfo"></span>
+      <div class="pageset">
+        <label style="font-size:12.5px;">Rows:</label>
+        <select id="pageSize">
+          <option value="50">50</option>
+          <option value="100">100</option>
+          <option value="200">200</option>
+          <option value="50000">All</option>
+        </select>
+        <button id="prevBtn">&larr; Prev</button>
+        <button id="nextBtn">Next &rarr;</button>
+      </div>
+    </div>
+  </section>
+</div>
+
+<div id="overlay"></div>
+<div id="detail"></div>
+<div id="lightbox"><img id="lightboxImg" src="" alt=""></div>
+
+<div id="progressOverlay">
+  <div id="progressModal">
+    <h3>Analyzing event…</h3>
+    <div class="meta" id="progressMeta"></div>
+    <div class="status-line" id="progressStatusLine"></div>
+    <div id="progressSteps"></div>
+    <div class="modal-actions">
+      <button class="small-btn" id="progressHideBtn">Hide (keep running)</button>
+      <button class="small-btn stop-btn" id="stopBtn">Stop analysis</button>
+    </div>
+  </div>
+</div>
+
+<div id="labelOverlay">
+  <div id="labelModal">
+    <h3>Feed to AI</h3>
+    <div class="meta" id="labelMeta"></div>
+    <div class="field-group">
+      <label>Verdict</label>
+      <select id="labelVerdict">
+        <option value="cleared">Cleared — not an incident</option>
+        <option value="needs_human_review">Needs human review</option>
+        <option value="confirmed_risk">Confirmed risk — real incident</option>
+      </select>
+    </div>
+    <div class="field-group">
+      <label>Why (this is what the model actually reads)</label>
+      <textarea id="labelNotes" rows="5" placeholder="e.g. This is a routine monthly export this employee does every month, confirmed with their manager. Not a leak."></textarea>
+    </div>
+    <div class="modal-actions">
+      <button class="small-btn" id="labelCancelBtn">Cancel</button>
+      <button class="run-btn" id="labelSubmitBtn" style="padding:8px 16px;">Submit</button>
+    </div>
+  </div>
+</div>
+
+<script src="common.js"></script>
+<script>
+const state = { limit: 50, offset: 0, verdict: '', severity: '', search: '', orderBy: 'event_time', orderDir: 'desc', useRange: true };
+let runPollTimer = null;
+
+// ---------------- stats + bulk run ----------------
+
+async function loadStats() {
+  const s = await api('/api/stats');
+  const cells = [`<div class="stat-cell"><div class="n">${s.total_events}</div><div class="l">Total events</div></div>`];
+  for (const v of ['auto_clear', 'spot_check', 'escalate', 'needs_human_review']) {
+    cells.push(`<div class="stat-cell"><div class="n">${(s.by_verdict||{})[v] || 0}</div><div class="l">${fmtVerdictLabel(v)}</div></div>`);
+  }
+  document.getElementById('statRow').innerHTML = cells.join('');
+
+  const runStatus = document.getElementById('runStatus');
+  const runBtn = document.getElementById('runBtn');
+  if (s.run_in_progress) {
+    runBtn.disabled = true;
+    pollRun();
+  } else {
+    runBtn.disabled = false;
+    if (s.last_run && !runPollTimer) {
+      const lr = s.last_run;
+      runStatus.textContent = lr.status === 'failed'
+        ? `last run failed: ${(lr.error||'').slice(0,80)}`
+        : `last run (${lr.begin_time||'?'} → ${lr.end_time||'?'}): ${lr.events_pulled||0} pulled, ${lr.events_escalated||0} escalated, ${lr.events_investigated||0} investigated`;
+    }
+  }
+}
+
+async function pollRun() {
+  if (runPollTimer) return;
+  const runStatus = document.getElementById('runStatus');
+  const runBtn = document.getElementById('runBtn');
+  runPollTimer = setInterval(async () => {
+    const runs = await api('/api/runs?limit=1');
+    const r = runs[0];
+    if (!r) return;
+    if (r.status === 'running') {
+      runStatus.innerHTML = `<span class="spinner"></span>pulled ${r.events_pulled||0} · escalated ${r.events_escalated||0} · investigated ${r.events_investigated||0}`;
+    } else {
+      clearInterval(runPollTimer);
+      runPollTimer = null;
+      runBtn.disabled = false;
+      runStatus.textContent = r.status === 'failed' ? `run failed: ${(r.error||'').slice(0,100)}` : 'run complete';
+      loadStats();
+      loadEvents();
+    }
+  }, 2000);
+}
+
+document.getElementById('runBtn').onclick = async () => {
+  const begin = toApiDt(document.getElementById('runBegin'));
+  const end = toApiDt(document.getElementById('runEnd'));
+  if (!begin || !end) { alert('Pick a From/To range first.'); return; }
+  document.getElementById('runBtn').disabled = true;
+  const r = await api(`/api/runs?begin=${encodeURIComponent(begin)}&end=${encodeURIComponent(end)}`, { method: 'POST' });
+  if (r.started === false) {
+    document.getElementById('runStatus').textContent = r.message;
+    document.getElementById('runBtn').disabled = false;
+  } else {
+    pollRun();
+  }
+};
+
+// ---------------- all-events table ----------------
+
+async function loadEvents() {
+  const params = new URLSearchParams({ limit: state.limit, offset: state.offset, order_by: state.orderBy, order_dir: state.orderDir });
+  if (state.verdict) params.set('verdict', state.verdict);
+  if (state.severity) params.set('severity', state.severity);
+  if (state.search) params.set('search', state.search);
+  if (state.useRange) {
+    const begin = toApiDt(document.getElementById('runBegin'));
+    const end = toApiDt(document.getElementById('runEnd'));
+    if (begin) params.set('begin', begin);
+    if (end) params.set('end', end);
+  }
+  const data = await api('/api/events?' + params.toString());
+
+  const body = document.getElementById('eventsBody');
+  if (!data.events.length) {
+    body.innerHTML = `<tr><td colspan="7"><div class="empty">No events match. Try "Run analysis" or clear filters.</div></td></tr>`;
+  } else {
+    body.innerHTML = data.events.map(e => `
+      <tr>
+        <td class="time clickable" onclick="openDetail(${e.id})">${e.event_time}</td>
+        <td class="uname clickable" onclick="openDetail(${e.id})">${escapeHtml(e.user_name || ('#' + e.user_locator))}</td>
+        <td class="file clickable" title="${escapeHtml(e.file_name || '')}" onclick="openDetail(${e.id})">${escapeHtml(e.file_name || '(no filename)')}</td>
+        <td class="dest clickable" onclick="openDetail(${e.id})">${escapeHtml(e.app_desc || '')}</td>
+        <td class="clickable" onclick="openDetail(${e.id})">${pill(e.verdict, e.verdict)}</td>
+        <td class="clickable" onclick="openDetail(${e.id})">${e.severity ? `<span class="pill ${e.verdict} sev-${e.severity}">${e.severity}</span>` : ''}</td>
+        <td class="actions">
+          <button class="small-btn" onclick="analyzeEvent(${e.row_auto_increment}, ${e.user_locator}, openDetail)">Analyze</button>
+          <button class="small-btn admin-only" style="display:${window.isAdmin ? '' : 'none'};" onclick="openLabelModal(${e.id}, '${escapeHtml(e.file_name||'').replace(/'/g,"\\'")}', '${escapeHtml(e.app_desc||'').replace(/'/g,"\\'")}')">Feed to AI</button>
+        </td>
+      </tr>
+    `).join('');
+  }
+
+  document.getElementById('pagerInfo').textContent =
+    `${data.total ? state.offset + 1 : 0}–${Math.min(state.offset + data.events.length, data.total)} of ${data.total}`;
+  document.getElementById('prevBtn').disabled = state.offset === 0;
+  document.getElementById('nextBtn').disabled = state.offset + state.limit >= data.total;
+  renderSortArrows('events', state);
+}
+
+document.getElementById('fVerdict').onchange = e => { state.verdict = e.target.value; state.offset = 0; loadEvents(); };
+document.getElementById('fSeverity').onchange = e => { state.severity = e.target.value; state.offset = 0; loadEvents(); };
+let searchDebounce;
+document.getElementById('fSearch').oninput = e => {
+  clearTimeout(searchDebounce);
+  searchDebounce = setTimeout(() => { state.search = e.target.value; state.offset = 0; loadEvents(); }, 300);
+};
+document.getElementById('prevBtn').onclick = () => { state.offset = Math.max(0, state.offset - state.limit); loadEvents(); };
+document.getElementById('nextBtn').onclick = () => { state.offset += state.limit; loadEvents(); };
+document.getElementById('pageSize').onchange = e => { state.limit = parseInt(e.target.value, 10); state.offset = 0; loadEvents(); };
+
+function updateRangeHint() {
+  const hint = document.getElementById('rangeHint');
+  hint.textContent = state.useRange
+    ? 'Showing events in the From/To range above.'
+    : 'Showing events across all time (range filter off).';
+}
+document.getElementById('fUseRange').onchange = e => {
+  state.useRange = e.target.checked; state.offset = 0; updateRangeHint(); loadEvents();
+};
+document.getElementById('runBegin').onchange = () => { if (state.useRange) { state.offset = 0; loadEvents(); } };
+document.getElementById('runEnd').onchange = () => { if (state.useRange) { state.offset = 0; loadEvents(); } };
+
+for (const v of ['auto_clear', 'baseline_match', 'spot_check', 'escalate', 'cleared', 'needs_human_review', 'confirmed_risk']) {
+  const o = document.createElement('option'); o.value = v; o.textContent = fmtVerdictLabel(v);
+  document.getElementById('fVerdict').appendChild(o);
+}
+for (const s of ['low', 'medium', 'high']) {
+  const o = document.createElement('option'); o.value = s; o.textContent = s;
+  document.getElementById('fSeverity').appendChild(o);
+}
+
+wireSortableHeaders('events', state, () => { state.offset = 0; loadEvents(); });
+
+// ---------------- init ----------------
+
+async function init() {
+  if (!(await requireAuth())) return;  // redirects to setup/login if not authenticated
+  await loadEmpHost();
+  const y = yesterday();
+  setInputToDate(document.getElementById('runBegin'), y, false);
+  setInputToDate(document.getElementById('runEnd'), y, true);
+  loadStats();
+  loadEvents();
+  setInterval(loadStats, 5000);
+}
+init();
+</script>
+</body>
+</html>
